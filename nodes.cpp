@@ -3,8 +3,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <memory>
 #include <set>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 // Colors
 
@@ -16,6 +21,7 @@ static constexpr COLORREF kPort     = RGB(200, 200, 206);
 static constexpr COLORREF kPortHot  = RGB(120, 190, 170);
 static constexpr COLORREF kWire     = RGB(140, 140, 148);
 static constexpr COLORREF kSelect   = RGB(58, 58, 64);
+static constexpr COLORREF kAccent   = RGB(110, 190, 170);
 
 static void fillRound(HDC hdc, RECT r, COLORREF fill, COLORREF edge) {
     HBRUSH br = CreateSolidBrush(fill);
@@ -49,12 +55,35 @@ static float dist2(POINT a, POINT b) {
 
 static void noopRebind(GraphNode&) {}
 static bool alwaysReady(const GraphNode&) { return true; }
+static NodePickMode noPickMode() { return NodePickMode::None; }
+static int noPickCount() { return 0; }
+static std::wstring noPickLabel(int) { return {}; }
+static bool noApplyPick(GraphNode&, int, std::wstring*) { return false; }
 
 // INPUT
 
+static void clearFxParams(GraphNode& n) {
+    n.gainDb = 0;
+    n.eqSubDb = n.eqLowDb = n.eqMidDb = n.eqHighDb = n.eqAirDb = 0;
+    n.compThresholdDb = -18.f;
+    n.compRatio = 4.f;
+    n.compAttackMs = 10.f;
+    n.compReleaseMs = 100.f;
+    n.compMakeupDb = 0.f;
+    n.pan = 0.f;
+    n.hpHz = 0.f;
+    n.lpHz = 0.f;
+    n.limitThresholdDb = -1.f;
+    n.limitReleaseMs = 50.f;
+    n.gateThresholdDb = -40.f;
+    n.gateAttackMs = 5.f;
+    n.gateReleaseMs = 100.f;
+    n.gateRangeDb = -60.f;
+}
+
 static void inputInit(GraphNode& n) {
     n.sel = -1; n.appName.clear(); n.appPid = 0; n.deviceId.clear();
-    n.gainDb = 0; n.eqSubDb = n.eqLowDb = n.eqMidDb = n.eqHighDb = n.eqAirDb = 0;
+    clearFxParams(n);
 }
 
 static void inputRebind(GraphNode& n) {
@@ -110,7 +139,7 @@ static const NodeBehavior kInputBehavior = {
 
 static void outputInit(GraphNode& n) {
     n.sel = -1; n.appName.clear(); n.appPid = 0; n.deviceId.clear();
-    n.gainDb = 0; n.eqSubDb = n.eqLowDb = n.eqMidDb = n.eqHighDb = n.eqAirDb = 0;
+    clearFxParams(n);
     for (size_t i = 0; i < g_outs.size(); ++i) {
         if (g_outs[i].isDefault) { n.sel = (int)i; n.deviceId = g_outs[i].id; break; }
     }
@@ -156,45 +185,23 @@ static const NodeBehavior kOutputBehavior = {
 
 // GAIN
 
-static const float kGainSteps[] = {
-    -12.f, -9.f, -6.f, -3.f, 0.f, 3.f, 6.f, 9.f, 12.f
-};
-static constexpr int kGainStepCount = 9;
-
 static void gainInit(GraphNode& n) {
-    n.sel = 4; // flat / 0 dB
-    n.gainDb = 0.f;
+    n.sel = -1;
     n.appName.clear(); n.appPid = 0; n.deviceId.clear();
-    n.eqSubDb = n.eqLowDb = n.eqMidDb = n.eqHighDb = n.eqAirDb = 0;
+    clearFxParams(n);
+    n.gainDb = 0.f;
 }
 
 static std::wstring gainLabel(const GraphNode& n) {
-    std::wstring s = L"Gain  ";
-    if (n.gainDb > 0) s += L"+";
-    s += std::to_wstring((int)n.gainDb) + L" dB";
-    return s;
-}
-
-static NodePickMode gainPickMode() { return NodePickMode::OptionList; }
-static int gainPickCount() { return kGainStepCount; }
-static std::wstring gainPickLabel(int index) {
-    if (index < 0 || index >= kGainStepCount) return {};
-    std::wstring s;
-    if (kGainSteps[index] > 0) s += L"+";
-    s += std::to_wstring((int)kGainSteps[index]) + L" dB";
-    return s;
-}
-static bool gainApplyPick(GraphNode& n, int index, std::wstring* status) {
-    if (index < 0 || index >= kGainStepCount) return false;
-    n.sel = index;
-    n.gainDb = kGainSteps[index];
-    if (status) *status = gainLabel(n);
-    return true;
+    wchar_t buf[48];
+    if (fabsf(n.gainDb) < 0.25f) return L"Gain  0 dB";
+    swprintf(buf, 48, L"Gain  %+.0f dB", n.gainDb);
+    return buf;
 }
 
 static const NodeBehavior kGainBehavior = {
     gainInit, noopRebind, gainLabel, alwaysReady,
-    gainPickMode, gainPickCount, gainPickLabel, gainApplyPick,
+    noPickMode, noPickCount, noPickLabel, noApplyPick,
     false, false, true
 };
 
@@ -218,9 +225,8 @@ static constexpr int kEqPresetCount = 7;
 
 static void eqInit(GraphNode& n) {
     n.sel = 0;
-    n.gainDb = 0;
-    n.eqSubDb = n.eqLowDb = n.eqMidDb = n.eqHighDb = n.eqAirDb = 0;
     n.appName.clear(); n.appPid = 0; n.deviceId.clear();
+    clearFxParams(n);
 }
 
 static std::wstring eqLabel(const GraphNode& n) {
@@ -253,13 +259,165 @@ static const NodeBehavior kEqBehavior = {
     false, false, true
 };
 
+// COMPRESSOR
+
+static void compInit(GraphNode& n) {
+    n.sel = -1;
+    n.appName.clear(); n.appPid = 0; n.deviceId.clear();
+    clearFxParams(n);
+    n.compThresholdDb = -18.f;
+    n.compRatio = 4.f;
+    n.compAttackMs = 10.f;
+    n.compReleaseMs = 100.f;
+    n.compMakeupDb = 3.f;
+}
+
+static std::wstring compLabel(const GraphNode&) {
+    return L"Compressor";
+}
+
+static const NodeBehavior kCompBehavior = {
+    compInit, noopRebind, compLabel, alwaysReady,
+    noPickMode, noPickCount, noPickLabel, noApplyPick,
+    false, false, true
+};
+
+// PAN
+
+static void panInit(GraphNode& n) {
+    n.sel = -1;
+    n.appName.clear(); n.appPid = 0; n.deviceId.clear();
+    clearFxParams(n);
+    n.pan = 0.f;
+}
+
+static std::wstring panLabel(const GraphNode& n) {
+    const int pct = (int)(n.pan * 100.f + (n.pan >= 0.f ? 0.5f : -0.5f));
+    if (pct == 0) return L"Pan  Center";
+    if (pct < 0) return L"Pan  L" + std::to_wstring(-pct);
+    return L"Pan  R" + std::to_wstring(pct);
+}
+
+static const NodeBehavior kPanBehavior = {
+    panInit, noopRebind, panLabel, alwaysReady,
+    noPickMode, noPickCount, noPickLabel, noApplyPick,
+    false, false, true
+};
+
+// HIGH-PASS
+
+static void hpInit(GraphNode& n) {
+    n.sel = -1;
+    n.appName.clear(); n.appPid = 0; n.deviceId.clear();
+    clearFxParams(n);
+    n.hpHz = 0.f;
+}
+
+static std::wstring hpLabel(const GraphNode& n) {
+    if (n.hpHz <= 0.f) return L"HP  Off";
+    return L"HP  " + std::to_wstring((int)lroundf(n.hpHz)) + L" Hz";
+}
+
+static const NodeBehavior kHpBehavior = {
+    hpInit, noopRebind, hpLabel, alwaysReady,
+    noPickMode, noPickCount, noPickLabel, noApplyPick,
+    false, false, true
+};
+
+// LOW-PASS
+
+static void lpInit(GraphNode& n) {
+    n.sel = -1;
+    n.appName.clear(); n.appPid = 0; n.deviceId.clear();
+    clearFxParams(n);
+    n.lpHz = 0.f;
+}
+
+static std::wstring lpLabel(const GraphNode& n) {
+    if (n.lpHz <= 0.f) return L"LP  Off";
+    return L"LP  " + std::to_wstring((int)lroundf(n.lpHz)) + L" Hz";
+}
+
+static const NodeBehavior kLpBehavior = {
+    lpInit, noopRebind, lpLabel, alwaysReady,
+    noPickMode, noPickCount, noPickLabel, noApplyPick,
+    false, false, true
+};
+
+// LIMITER
+
+static void limitInit(GraphNode& n) {
+    n.sel = -1;
+    n.appName.clear(); n.appPid = 0; n.deviceId.clear();
+    clearFxParams(n);
+    n.limitThresholdDb = -1.f;
+    n.limitReleaseMs = 50.f;
+}
+
+static std::wstring limitLabel(const GraphNode&) {
+    return L"Limiter";
+}
+
+static const NodeBehavior kLimitBehavior = {
+    limitInit, noopRebind, limitLabel, alwaysReady,
+    noPickMode, noPickCount, noPickLabel, noApplyPick,
+    false, false, true
+};
+
+// GATE
+
+static void gateInit(GraphNode& n) {
+    n.sel = -1;
+    n.appName.clear(); n.appPid = 0; n.deviceId.clear();
+    clearFxParams(n);
+    n.gateThresholdDb = -40.f;
+    n.gateAttackMs = 5.f;
+    n.gateReleaseMs = 100.f;
+    n.gateRangeDb = -60.f;
+}
+
+static std::wstring gateLabel(const GraphNode&) {
+    return L"Gate";
+}
+
+static const NodeBehavior kGateBehavior = {
+    gateInit, noopRebind, gateLabel, alwaysReady,
+    noPickMode, noPickCount, noPickLabel, noApplyPick,
+    false, false, true
+};
+
+// WAVEFORM (pass-through analyzer)
+
+static void waveInit(GraphNode& n) {
+    n.sel = -1;
+    n.appName.clear(); n.appPid = 0; n.deviceId.clear();
+    clearFxParams(n);
+}
+
+static std::wstring waveLabel(const GraphNode&) {
+    return L"Waveform";
+}
+
+static const NodeBehavior kWaveBehavior = {
+    waveInit, noopRebind, waveLabel, alwaysReady,
+    noPickMode, noPickCount, noPickLabel, noApplyPick,
+    false, false, true
+};
+
 // Catalog
 
 static const NodeTypeInfo kCatalog[] = {
-    { NodeKind::Input,  L"input",  L"Input",  L"INPUT",  false, true,  &kInputBehavior  },
-    { NodeKind::Output, L"output", L"Output", L"OUTPUT", true,  false, &kOutputBehavior },
-    { NodeKind::Gain,   L"gain",   L"Gain",   L"GAIN",   true,  true,  &kGainBehavior   },
-    { NodeKind::Eq,     L"eq",     L"EQ",     L"EQ",     true,  true,  &kEqBehavior     },
+    { NodeKind::Input,    L"input",    L"Input",      L"INPUT",  false, true,  &kInputBehavior  },
+    { NodeKind::Output,   L"output",   L"Output",     L"OUTPUT", true,  false, &kOutputBehavior },
+    { NodeKind::Gain,     L"gain",     L"Gain",       L"GAIN",   true,  true,  &kGainBehavior   },
+    { NodeKind::Eq,       L"eq",       L"EQ",         L"EQ",     true,  true,  &kEqBehavior     },
+    { NodeKind::Comp,     L"comp",     L"Compressor", L"COMP",   true,  true,  &kCompBehavior   },
+    { NodeKind::Pan,      L"pan",      L"Pan",        L"PAN",    true,  true,  &kPanBehavior    },
+    { NodeKind::HighPass, L"hipass",   L"High-pass",  L"HP",     true,  true,  &kHpBehavior     },
+    { NodeKind::LowPass,  L"lopass",   L"Low-pass",   L"LP",     true,  true,  &kLpBehavior     },
+    { NodeKind::Limit,    L"limit",    L"Limiter",    L"LIMIT",  true,  true,  &kLimitBehavior  },
+    { NodeKind::Gate,     L"gate",     L"Gate",       L"GATE",   true,  true,  &kGateBehavior   },
+    { NodeKind::Waveform, L"wave",     L"Waveform",   L"WAVE",   true,  true,  &kWaveBehavior   },
 };
 
 const std::vector<NodeTypeInfo>& nodeCatalog() {
@@ -284,7 +442,18 @@ int nodeCatalogCount() {
 // Geometry
 
 int nodeHeight(const GraphNode& n) {
-    return n.kind == NodeKind::Eq ? kEqNodeH : kNodeH;
+    switch (n.kind) {
+    case NodeKind::Eq: return kEqNodeH;
+    case NodeKind::Comp:
+    case NodeKind::Gate: return kCompNodeH;
+    case NodeKind::Waveform: return kWaveNodeH;
+    case NodeKind::Gain:
+    case NodeKind::Pan:
+    case NodeKind::HighPass:
+    case NodeKind::LowPass:
+    case NodeKind::Limit: return kKnobNodeH;
+    default: return kNodeH;
+    }
 }
 
 POINT worldToScreen(POINT w, const NodeView& view) {
@@ -310,6 +479,10 @@ RECT eqCurveRectScreen(const GraphNode& n, const NodeView& view) {
     RECT r = nodeRectScreen(n, view);
     return { r.left + 14, r.top + 36, r.right - 14, r.bottom - 38 };
 }
+RECT wavePlotRectScreen(const GraphNode& n, const NodeView& view) {
+    RECT r = nodeRectScreen(n, view);
+    return { r.left + 14, r.top + 36, r.right - 14, r.bottom - 14 };
+}
 RECT nodeMeterRectScreen(const GraphNode& n, const NodeView& view) {
     RECT r = nodeRectScreen(n, view);
     return { r.right - 22, r.top + 38, r.right - 10, r.bottom - 12 };
@@ -321,13 +494,25 @@ RECT nodeFieldRectScreen(const GraphNode& n, const NodeView& view) {
     const int rightPad = (n.kind == NodeKind::Output || n.kind == NodeKind::Input) ? 28 : 14;
     return { r.left + 14, r.top + 42, r.right - rightPad, r.top + 74 };
 }
+static bool nodeUsesTitlePorts(const GraphNode& n) {
+    return n.kind == NodeKind::Eq
+        || n.kind == NodeKind::Gain
+        || n.kind == NodeKind::Pan
+        || n.kind == NodeKind::HighPass
+        || n.kind == NodeKind::LowPass
+        || n.kind == NodeKind::Comp
+        || n.kind == NodeKind::Limit
+        || n.kind == NodeKind::Gate
+        || n.kind == NodeKind::Waveform;
+}
+
 POINT outPortWorld(const GraphNode& n) {
-    // ports stay in the title so they don't steal EQ handle clicks
-    const int cy = (n.kind == NodeKind::Eq) ? 18 : nodeHeight(n) / 2;
+    // ports stay in the title so they don't steal knob / EQ handle clicks
+    const int cy = nodeUsesTitlePorts(n) ? 18 : nodeHeight(n) / 2;
     return { n.x + kNodeW, n.y + cy };
 }
 POINT inPortWorld(const GraphNode& n) {
-    const int cy = (n.kind == NodeKind::Eq) ? 18 : nodeHeight(n) / 2;
+    const int cy = nodeUsesTitlePorts(n) ? 18 : nodeHeight(n) / 2;
     return { n.x, n.y + cy };
 }
 POINT outPortScreen(const GraphNode& n, const NodeView& view) { return worldToScreen(outPortWorld(n), view); }
@@ -348,6 +533,284 @@ bool hitNodeField(const GraphNode& n, const NodeView& view, int sx, int sy) {
 }
 bool hitEqCurve(const GraphNode& n, const NodeView& view, int sx, int sy) {
     return n.kind == NodeKind::Eq && hitRect(eqCurveRectScreen(n, view), sx, sy);
+}
+
+// Knobs — vertical drag, 270° dial
+
+enum class KnobScale { Linear, Log };
+
+struct KnobSpec {
+    const wchar_t* name;
+    KnobScale scale;
+    float minV;
+    float maxV;
+};
+
+static const KnobSpec kGainKnobs[] = {
+    { L"Gain", KnobScale::Linear, -12.f, 12.f },
+};
+static const KnobSpec kPanKnobs[] = {
+    { L"Pan", KnobScale::Linear, -1.f, 1.f },
+};
+static const KnobSpec kHpKnobs[] = {
+    { L"Freq", KnobScale::Linear, 0.f, 200.f },
+};
+static const KnobSpec kLpKnobs[] = {
+    { L"Freq", KnobScale::Linear, 0.f, 16000.f },
+};
+static const KnobSpec kCompKnobs[] = {
+    { L"Thr", KnobScale::Linear, -40.f, 0.f },
+    { L"Rat", KnobScale::Log, 1.f, 20.f },
+    { L"Atk", KnobScale::Log, 0.5f, 50.f },
+    { L"Rel", KnobScale::Log, 20.f, 500.f },
+    { L"Mk",  KnobScale::Linear, 0.f, 12.f },
+};
+static const KnobSpec kLimitKnobs[] = {
+    { L"Thr", KnobScale::Linear, -24.f, 0.f },
+    { L"Rel", KnobScale::Log, 10.f, 500.f },
+};
+static const KnobSpec kGateKnobs[] = {
+    { L"Thr", KnobScale::Linear, -60.f, -10.f },
+    { L"Atk", KnobScale::Log, 0.5f, 50.f },
+    { L"Rel", KnobScale::Log, 20.f, 500.f },
+    { L"Rng", KnobScale::Linear, -80.f, -6.f },
+};
+
+static const KnobSpec* knobSpecs(NodeKind kind, int* outCount) {
+    switch (kind) {
+    case NodeKind::Gain:
+        if (outCount) *outCount = 1;
+        return kGainKnobs;
+    case NodeKind::Pan:
+        if (outCount) *outCount = 1;
+        return kPanKnobs;
+    case NodeKind::HighPass:
+        if (outCount) *outCount = 1;
+        return kHpKnobs;
+    case NodeKind::LowPass:
+        if (outCount) *outCount = 1;
+        return kLpKnobs;
+    case NodeKind::Comp:
+        if (outCount) *outCount = 5;
+        return kCompKnobs;
+    case NodeKind::Limit:
+        if (outCount) *outCount = 2;
+        return kLimitKnobs;
+    case NodeKind::Gate:
+        if (outCount) *outCount = 4;
+        return kGateKnobs;
+    default:
+        if (outCount) *outCount = 0;
+        return nullptr;
+    }
+}
+
+static float* knobValuePtr(GraphNode& n, int knob) {
+    switch (n.kind) {
+    case NodeKind::Gain: return &n.gainDb;
+    case NodeKind::Pan: return &n.pan;
+    case NodeKind::HighPass: return &n.hpHz;
+    case NodeKind::LowPass: return &n.lpHz;
+    case NodeKind::Comp:
+        switch (knob) {
+        case 0: return &n.compThresholdDb;
+        case 1: return &n.compRatio;
+        case 2: return &n.compAttackMs;
+        case 3: return &n.compReleaseMs;
+        case 4: return &n.compMakeupDb;
+        default: return nullptr;
+        }
+    case NodeKind::Limit:
+        switch (knob) {
+        case 0: return &n.limitThresholdDb;
+        case 1: return &n.limitReleaseMs;
+        default: return nullptr;
+        }
+    case NodeKind::Gate:
+        switch (knob) {
+        case 0: return &n.gateThresholdDb;
+        case 1: return &n.gateAttackMs;
+        case 2: return &n.gateReleaseMs;
+        case 3: return &n.gateRangeDb;
+        default: return nullptr;
+        }
+    default: return nullptr;
+    }
+}
+
+static float knobValueOf(const GraphNode& n, int knob) {
+    GraphNode tmp = n;
+    float* p = knobValuePtr(tmp, knob);
+    return p ? *p : 0.f;
+}
+
+static float clamp01(float t) {
+    if (t < 0.f) return 0.f;
+    if (t > 1.f) return 1.f;
+    return t;
+}
+
+static float valueToNorm(float v, const KnobSpec& s) {
+    if (s.scale == KnobScale::Log) {
+        const float a = logf((std::max)(s.minV, 1e-4f));
+        const float b = logf((std::max)(s.maxV, 1e-4f));
+        v = (std::max)(s.minV, (std::min)(s.maxV, v));
+        return clamp01((logf(v) - a) / (b - a));
+    }
+    if (fabsf(s.maxV - s.minV) < 1e-6f) return 0.f;
+    return clamp01((v - s.minV) / (s.maxV - s.minV));
+}
+
+static float normToValue(float t, const KnobSpec& s) {
+    t = clamp01(t);
+    if (s.scale == KnobScale::Log) {
+        const float a = logf((std::max)(s.minV, 1e-4f));
+        const float b = logf((std::max)(s.maxV, 1e-4f));
+        return expf(a + t * (b - a));
+    }
+    return s.minV + t * (s.maxV - s.minV);
+}
+
+int nodeKnobCount(const GraphNode& n) {
+    int c = 0;
+    knobSpecs(n.kind, &c);
+    return c;
+}
+
+RECT nodeKnobRectScreen(const GraphNode& n, const NodeView& view, int knob) {
+    RECT r = nodeRectScreen(n, view);
+    const int count = nodeKnobCount(n);
+    if (count <= 0 || knob < 0 || knob >= count) return { 0, 0, 0, 0 };
+
+    // content box inside the node (title above, caption strip below)
+    const int contentL = r.left + 14;
+    const int contentR = r.right - 14;
+    const int contentT = r.top + 36;
+    const int contentB = r.bottom - 20;
+    const int contentW = contentR - contentL;
+    const int cellW = contentW / count;
+    const int originX = contentL + (contentW - cellW * count) / 2;
+
+    // odd diameter so the circle has a true center pixel
+    const int diam = (count == 1) ? 45 : 31;
+    const int rad = diam / 2; // 22 or 15
+    const int cx = originX + knob * cellW + cellW / 2;
+    const int cy = contentT + (contentB - contentT) / 2;
+    // store as inclusive pixel bounds (width = diam = 2*rad+1)
+    return { cx - rad, cy - rad, cx + rad, cy + rad };
+}
+
+int hitKnobAt(const NodeGraph& g, const NodeView& view, int sx, int sy, int* outKnob) {
+    if (outKnob) *outKnob = -1;
+    for (int i = (int)g.nodes.size() - 1; i >= 0; --i) {
+        const int count = nodeKnobCount(g.nodes[i]);
+        for (int k = 0; k < count; ++k) {
+            RECT kr = nodeKnobRectScreen(g.nodes[i], view, k);
+            const int diam = kr.right - kr.left + 1;
+            const int rad = diam / 2;
+            const int cx = kr.left + rad;
+            const int cy = kr.top + rad;
+            const int hitR = rad + 6;
+            const int dx = sx - cx, dy = sy - cy;
+            if (dx * dx + dy * dy <= hitR * hitR) {
+                if (outKnob) *outKnob = k;
+                return i;
+            }
+        }
+    }
+    return -1;
+}
+
+float knobNorm(const GraphNode& n, int knob) {
+    int count = 0;
+    const KnobSpec* specs = knobSpecs(n.kind, &count);
+    if (!specs || knob < 0 || knob >= count) return 0.f;
+    return valueToNorm(knobValueOf(n, knob), specs[knob]);
+}
+
+void applyKnobNorm(GraphNode& n, int knob, float norm) {
+    int count = 0;
+    const KnobSpec* specs = knobSpecs(n.kind, &count);
+    float* p = knobValuePtr(n, knob);
+    if (!specs || !p || knob < 0 || knob >= count) return;
+    float v = normToValue(norm, specs[knob]);
+    if (n.kind == NodeKind::HighPass && v < 8.f) v = 0.f; // snap near-zero to Off
+    if (n.kind == NodeKind::LowPass && v < 500.f) v = 0.f;
+    if (n.kind == NodeKind::Gain) v = roundf(v * 2.f) / 2.f; // 0.5 dB steps
+    if (n.kind == NodeKind::Pan) v = roundf(v * 100.f) / 100.f;
+    *p = v;
+}
+
+std::wstring knobCaption(const GraphNode& n, int knob) {
+    int count = 0;
+    const KnobSpec* specs = knobSpecs(n.kind, &count);
+    if (!specs || knob < 0 || knob >= count) return {};
+    return specs[knob].name;
+}
+
+std::wstring knobValueText(const GraphNode& n, int knob) {
+    wchar_t buf[48];
+    switch (n.kind) {
+    case NodeKind::Gain:
+        if (fabsf(n.gainDb) < 0.25f) return L"0 dB";
+        swprintf(buf, 48, L"%+.0f dB", n.gainDb);
+        return buf;
+    case NodeKind::Pan: {
+        const int pct = (int)(n.pan * 100.f + (n.pan >= 0.f ? 0.5f : -0.5f));
+        if (pct == 0) return L"Center";
+        if (pct < 0) { swprintf(buf, 48, L"L%d", -pct); return buf; }
+        swprintf(buf, 48, L"R%d", pct);
+        return buf;
+    }
+    case NodeKind::HighPass:
+        if (n.hpHz <= 0.f) return L"Off";
+        swprintf(buf, 48, L"%d Hz", (int)lroundf(n.hpHz));
+        return buf;
+    case NodeKind::LowPass:
+        if (n.lpHz <= 0.f) return L"Off";
+        if (n.lpHz >= 1000.f)
+            swprintf(buf, 48, L"%.1fk", n.lpHz / 1000.f);
+        else
+            swprintf(buf, 48, L"%d Hz", (int)lroundf(n.lpHz));
+        return buf;
+    case NodeKind::Comp:
+        switch (knob) {
+        case 0:
+            if (fabsf(n.compThresholdDb) < 0.5f) return L"0";
+            swprintf(buf, 48, L"%.0f", n.compThresholdDb);
+            return buf;
+        case 1: swprintf(buf, 48, L"%.1f:1", n.compRatio); return buf;
+        case 2: swprintf(buf, 48, L"%.0fms", n.compAttackMs); return buf;
+        case 3: swprintf(buf, 48, L"%.0fms", n.compReleaseMs); return buf;
+        case 4:
+            if (fabsf(n.compMakeupDb) < 0.25f) return L"0";
+            swprintf(buf, 48, L"%+.0f", n.compMakeupDb);
+            return buf;
+        default: break;
+        }
+        break;
+    case NodeKind::Limit:
+        switch (knob) {
+        case 0:
+            if (fabsf(n.limitThresholdDb) < 0.25f) return L"0";
+            swprintf(buf, 48, L"%.0f", n.limitThresholdDb);
+            return buf;
+        case 1: swprintf(buf, 48, L"%.0fms", n.limitReleaseMs); return buf;
+        default: break;
+        }
+        break;
+    case NodeKind::Gate:
+        switch (knob) {
+        case 0: swprintf(buf, 48, L"%.0f", n.gateThresholdDb); return buf;
+        case 1: swprintf(buf, 48, L"%.0fms", n.gateAttackMs); return buf;
+        case 2: swprintf(buf, 48, L"%.0fms", n.gateReleaseMs); return buf;
+        case 3: swprintf(buf, 48, L"%.0f", n.gateRangeDb); return buf;
+        default: break;
+        }
+        break;
+    default: break;
+    }
+    return {};
 }
 
 static constexpr int kEqBands = 5;
@@ -583,16 +1046,58 @@ bool routeRunnable(const NodeGraph& g, const AudioRoute& route) {
 
 static FxStep stepFromNode(const GraphNode& n) {
     FxStep s;
-    if (n.kind == NodeKind::Gain) {
+    switch (n.kind) {
+    case NodeKind::Gain:
         s.kind = FxKind::Gain;
         s.gainDb = n.gainDb;
-    } else {
+        break;
+    case NodeKind::Eq:
         s.kind = FxKind::Eq;
         s.eqSubDb = n.eqSubDb;
         s.eqLowDb = n.eqLowDb;
         s.eqMidDb = n.eqMidDb;
         s.eqHighDb = n.eqHighDb;
         s.eqAirDb = n.eqAirDb;
+        break;
+    case NodeKind::Comp:
+        s.kind = FxKind::Comp;
+        s.compThresholdDb = n.compThresholdDb;
+        s.compRatio = n.compRatio;
+        s.compAttackMs = n.compAttackMs;
+        s.compReleaseMs = n.compReleaseMs;
+        s.compMakeupDb = n.compMakeupDb;
+        break;
+    case NodeKind::Pan:
+        s.kind = FxKind::Pan;
+        s.pan = n.pan;
+        break;
+    case NodeKind::HighPass:
+        s.kind = FxKind::HighPass;
+        s.hpHz = n.hpHz;
+        break;
+    case NodeKind::LowPass:
+        s.kind = FxKind::LowPass;
+        s.lpHz = n.lpHz;
+        break;
+    case NodeKind::Limit:
+        s.kind = FxKind::Limit;
+        s.limitThresholdDb = n.limitThresholdDb;
+        s.limitReleaseMs = n.limitReleaseMs;
+        break;
+    case NodeKind::Gate:
+        s.kind = FxKind::Gate;
+        s.gateThresholdDb = n.gateThresholdDb;
+        s.gateAttackMs = n.gateAttackMs;
+        s.gateReleaseMs = n.gateReleaseMs;
+        s.gateRangeDb = n.gateRangeDb;
+        break;
+    case NodeKind::Waveform:
+        s.kind = FxKind::Waveform;
+        break;
+    default:
+        s.kind = FxKind::Gain;
+        s.gainDb = 0.f;
+        break;
     }
     return s;
 }
@@ -812,8 +1317,124 @@ static void drawEqCurve(HDC hdc, const GraphNode& n, const NodeView& view) {
     }
 }
 
+static void drawKnob(HDC hdc, const RECT& kr, float norm, const wchar_t* caption,
+                     const wchar_t* value, HFONT font) {
+    // kr is inclusive bounds with odd width/height → true center pixel
+    const int diam = kr.right - kr.left + 1;
+    const int rad = diam / 2;
+    const int cx = kr.left + rad;
+    const int cy = kr.top + rad;
+
+    HBRUSH face = CreateSolidBrush(RGB(52, 52, 58));
+    HPEN rim = CreatePen(PS_SOLID, 1, RGB(110, 110, 118));
+    HGDIOBJ obr = SelectObject(hdc, face);
+    HGDIOBJ open = SelectObject(hdc, rim);
+    // exclusive right/bottom = inclusive + 1
+    Ellipse(hdc, kr.left, kr.top, kr.right + 1, kr.bottom + 1);
+    SelectObject(hdc, obr); SelectObject(hdc, open);
+    DeleteObject(face); DeleteObject(rim);
+
+    // 270° sweep from 7:30 to 4:30 — tip sits on the rim, hub at exact center
+    const float t = clamp01(norm);
+    const float angle = (float)M_PI * 0.75f + t * (float)M_PI * 1.5f;
+    const float tipLen = (float)(rad - 5);
+    const int ix = cx + (int)lroundf(cosf(angle) * tipLen);
+    const int iy = cy + (int)lroundf(sinf(angle) * tipLen);
+
+    HPEN needle = CreatePen(PS_SOLID, 2, RGB(120, 200, 180));
+    open = SelectObject(hdc, needle);
+    MoveToEx(hdc, cx, cy, nullptr);
+    LineTo(hdc, ix, iy);
+    SelectObject(hdc, open);
+    DeleteObject(needle);
+
+    // 7×7 hub, odd size, same center pixel
+    HBRUSH hub = CreateSolidBrush(RGB(200, 200, 206));
+    obr = SelectObject(hdc, hub);
+    open = SelectObject(hdc, GetStockObject(NULL_PEN));
+    Ellipse(hdc, cx - 3, cy - 3, cx + 4, cy + 4);
+    SelectObject(hdc, obr); SelectObject(hdc, open);
+    DeleteObject(hub);
+
+    SetBkMode(hdc, TRANSPARENT);
+    if (font) SelectObject(hdc, font);
+    SetTextColor(hdc, kMuted);
+    RECT cap{ cx - 28, kr.bottom + 3, cx + 29, kr.bottom + 18 };
+    DrawTextW(hdc, caption, -1, &cap, DT_CENTER | DT_SINGLELINE | DT_TOP);
+
+    SetTextColor(hdc, kText);
+    RECT val{ cx - 36, kr.top - 16, cx + 37, kr.top - 1 };
+    DrawTextW(hdc, value, -1, &val, DT_CENTER | DT_SINGLELINE | DT_BOTTOM);
+}
+
+bool copyNodeWaveform(const NodeGraph& g, int nodeIdx, float* out, int count) {
+    if (!out || count <= 0 || nodeIdx < 0 || nodeIdx >= (int)g.nodes.size()) return false;
+    if (g.nodes[nodeIdx].kind != NodeKind::Waveform) return false;
+
+    std::lock_guard liveLock(g_liveFxMu);
+    for (auto& b : g_liveFx) {
+        if (!b.fx) continue;
+        int waveOrd = -1;
+        int waveI = 0;
+        for (int ei : b.effectNodes) {
+            if (ei < 0 || ei >= (int)g.nodes.size()) continue;
+            if (!nodeBehavior(g.nodes[ei].kind).isEffect) continue;
+            if (g.nodes[ei].kind != NodeKind::Waveform) continue;
+            if (ei == nodeIdx) waveOrd = waveI;
+            ++waveI;
+        }
+        if (waveOrd < 0) continue;
+
+        std::lock_guard fxLock(b.fx->mu);
+        if (waveOrd >= (int)b.fx->waveStates.size()) continue;
+        const auto& st = b.fx->waveStates[waveOrd];
+        for (int i = 0; i < count; ++i) {
+            const int src = (i * (kWaveCapture - 1)) / (std::max)(1, count - 1);
+            out[i] = st.samples[src];
+        }
+        return true;
+    }
+    return false;
+}
+
+static void drawWavePlot(HDC hdc, const NodeGraph& g, int nodeIdx, const NodeView& view) {
+    if (nodeIdx < 0 || nodeIdx >= (int)g.nodes.size()) return;
+    const GraphNode& n = g.nodes[nodeIdx];
+    RECT plot = wavePlotRectScreen(n, view);
+    fillRound(hdc, plot, RGB(48, 48, 54), RGB(70, 70, 78));
+
+    const int midY = (plot.top + plot.bottom) / 2;
+    HPEN guide = CreatePen(PS_DOT, 1, RGB(90, 90, 98));
+    HGDIOBJ oldPen = SelectObject(hdc, guide);
+    MoveToEx(hdc, plot.left + 4, midY, nullptr);
+    LineTo(hdc, plot.right - 4, midY);
+    SelectObject(hdc, oldPen);
+    DeleteObject(guide);
+
+    float samples[kWavePlotSamples]{};
+    copyNodeWaveform(g, nodeIdx, samples, kWavePlotSamples);
+
+    const int w = (std::max)(1, (int)(plot.right - plot.left));
+    const int h = (std::max)(1, (int)(plot.bottom - plot.top));
+    const float amp = h * 0.40f;
+    POINT pts[kWavePlotSamples];
+    for (int i = 0; i < kWavePlotSamples; ++i) {
+        float v = samples[i];
+        if (v > 1.f) v = 1.f;
+        if (v < -1.f) v = -1.f;
+        pts[i].x = plot.left + (int)((i / (float)(kWavePlotSamples - 1)) * w + 0.5f);
+        pts[i].y = midY - (int)(v * amp + 0.5f);
+    }
+
+    HPEN wavePen = CreatePen(PS_SOLID, 2, RGB(110, 190, 170));
+    oldPen = SelectObject(hdc, wavePen);
+    Polyline(hdc, pts, kWavePlotSamples);
+    SelectObject(hdc, oldPen);
+    DeleteObject(wavePen);
+}
+
 void drawNode(HDC hdc, const GraphNode& n, const NodeView& view, const NodeFonts& fonts,
-              bool flowing, float meterIn, float meterOut) {
+              bool flowing, float meterIn, float meterOut, const NodeGraph* graph, int nodeIdx) {
     const auto& t = nodeType(n.kind);
     RECT r = nodeRectScreen(n, view);
     fillRound(hdc, r, kNode, kNodeEdge);
@@ -833,6 +1454,17 @@ void drawNode(HDC hdc, const GraphNode& n, const NodeView& view, const NodeFonts
         std::wstring label = nodeLabel(n);
         RECT tr = chip; InflateRect(&tr, -8, 0);
         DrawTextW(hdc, label.c_str(), -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    } else if (n.kind == NodeKind::Waveform && graph) {
+        drawWavePlot(hdc, *graph, nodeIdx, view);
+    } else if (nodeKnobCount(n) > 0) {
+        if (fonts.ui) SelectObject(hdc, fonts.ui);
+        const int count = nodeKnobCount(n);
+        for (int k = 0; k < count; ++k) {
+            RECT kr = nodeKnobRectScreen(n, view, k);
+            std::wstring cap = knobCaption(n, k);
+            std::wstring val = knobValueText(n, k);
+            drawKnob(hdc, kr, knobNorm(n, k), cap.c_str(), val.c_str(), fonts.ui);
+        }
     } else if (nodeHasPicker(n)) {
         RECT field = nodeFieldRectScreen(n, view);
         fillRound(hdc, field, kSelect, kNodeEdge);
@@ -865,8 +1497,8 @@ void drawGraph(HDC hdc, const NodeGraph& g, const NodeView& view, const NodeFont
         const bool flow = flowing && linkOnRunnableRoute(g, i);
         drawWire(hdc, outPortScreen(g.nodes[c.from], view), inPortScreen(g.nodes[c.to], view), flow, audioLevel);
     }
-    for (auto& n : g.nodes)
-        drawNode(hdc, n, view, fonts, flowing, meterIn, meterOut);
+    for (int i = 0; i < (int)g.nodes.size(); ++i)
+        drawNode(hdc, g.nodes[i], view, fonts, flowing, meterIn, meterOut, &g, i);
 
     if (flowing) {
         for (int i = 0; i < (int)g.links.size(); ++i) {

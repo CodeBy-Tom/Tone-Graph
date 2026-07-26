@@ -56,6 +56,12 @@ struct UiState {
     int eqNode = -1;
     int eqBand = -1;
 
+    bool dragKnob = false;
+    int knobNode = -1;
+    int knobIdx = -1;
+    int knobStartY = 0;
+    float knobStartNorm = 0.f;
+
     bool plusHot = false;
     bool gearHot = false;
     bool runHot = false;
@@ -183,7 +189,7 @@ static void tryStartStop(HWND hwnd) {
         setStatus(L"Stopping\u2026");
         return;
     }
-    if (g_ui.graph.links.empty()) { setStatus(L"Connect Input \u2192 [Gain/EQ] \u2192 Output."); return; }
+    if (g_ui.graph.links.empty()) { setStatus(L"Connect Input \u2192 [effects] \u2192 Output."); return; }
 
     refreshDevices();
     auto routes = findAudioRoutes(g_ui.graph);
@@ -192,7 +198,7 @@ static void tryStartStop(HWND hwnd) {
         if (routeRunnable(g_ui.graph, r)) ready.push_back(r);
 
     if (ready.empty()) {
-        setStatus(L"Wire Input through optional Gain/EQ to an Output, then pick devices.");
+        setStatus(L"Wire Input through optional effects to an Output, then pick devices.");
         return;
     }
 
@@ -569,6 +575,19 @@ static void onLButtonDown(HWND hwnd, int x, int y) {
         return;
     }
 
+    int knobIdx = -1;
+    int knobNi = hitKnobAt(g_ui.graph, g_ui.view, x, y, &knobIdx);
+    if (knobNi >= 0 && knobIdx >= 0) {
+        g_ui.dragKnob = true;
+        g_ui.knobNode = knobNi;
+        g_ui.knobIdx = knobIdx;
+        g_ui.knobStartY = y;
+        g_ui.knobStartNorm = knobNorm(g_ui.graph.nodes[knobNi], knobIdx);
+        SetCapture(hwnd);
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return;
+    }
+
     int oi = hitOutPortAt(g_ui.graph, g_ui.view, x, y);
     if (oi >= 0) {
         g_ui.dragWire = true;
@@ -652,11 +671,18 @@ static void onMouseMove(HWND hwnd, int x, int y) {
         if (g_busy) syncLiveFxFromGraph(g_ui.graph);
         changed = true;
     }
+    if (g_ui.dragKnob && g_ui.knobNode >= 0 && g_ui.knobNode < (int)g_ui.graph.nodes.size()) {
+        // drag up increases; ~120px spans full range
+        const float delta = (float)(g_ui.knobStartY - y) / 120.f;
+        applyKnobNorm(g_ui.graph.nodes[g_ui.knobNode], g_ui.knobIdx, g_ui.knobStartNorm + delta);
+        if (g_busy) syncLiveFxFromGraph(g_ui.graph);
+        changed = true;
+    }
     if (g_ui.dragNode && g_ui.dragIdx >= 0 && g_ui.dragIdx < (int)g_ui.graph.nodes.size()) {
         POINT w = screenToWorld(x, y, g_ui.view);
         auto& n = g_ui.graph.nodes[g_ui.dragIdx];
         n.x = w.x - g_ui.dragOff.x;
-        n.y = (std::max)(kToolbar, (int)(w.y - g_ui.dragOff.y));
+        n.y = w.y - g_ui.dragOff.y;
         clampScroll();
         changed = true;
     }
@@ -691,6 +717,13 @@ static void onLButtonUp(HWND hwnd, int x, int y) {
         g_ui.dragEq = false;
         g_ui.eqNode = -1;
         g_ui.eqBand = -1;
+        ReleaseCapture();
+        InvalidateRect(hwnd, nullptr, FALSE);
+    }
+    if (g_ui.dragKnob) {
+        g_ui.dragKnob = false;
+        g_ui.knobNode = -1;
+        g_ui.knobIdx = -1;
         ReleaseCapture();
         InvalidateRect(hwnd, nullptr, FALSE);
     }
@@ -748,7 +781,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 if (in > 0.001f) g_meterIn.store(in * 0.82f, std::memory_order_relaxed);
                 if (out > 0.001f) g_meterOut.store(out * 0.82f, std::memory_order_relaxed);
             }
-            if (g_busy || g_ui.dragEq ||
+            if (g_busy || g_ui.dragEq || g_ui.dragKnob ||
                 g_meterIn.load(std::memory_order_relaxed) > 0.001f ||
                 g_meterOut.load(std::memory_order_relaxed) > 0.001f)
                 InvalidateRect(hwnd, nullptr, FALSE);

@@ -1,6 +1,8 @@
 # Tone Graph
 
-Route per-app Windows audio through a simple node graph (Input → Gain/EQ → Output).
+Route per-app Windows audio through a simple node graph (Input → effects → Output).
+
+Effects: Gain, EQ, Compressor, Pan, High-pass, Low-pass, Limiter, Gate, Waveform.
 
 ## Needs
 
@@ -19,7 +21,6 @@ That makes `ToneGraph.exe`.
 ## Use
 
 1. Run `ToneGraph.exe`
-2. Add Input / Output (and optional Gain or EQ)
+2. Add Input / Output (and optional effects)
 3. Wire them together, pick an app and an output device
 4. Hit **Run**
-

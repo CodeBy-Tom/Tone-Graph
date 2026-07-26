@@ -4,7 +4,7 @@
 #include <mutex>
 #include <vector>
 
-enum class FxKind { Gain, Eq };
+enum class FxKind { Gain, Eq, Comp, Pan, HighPass, Waveform, LowPass, Limit, Gate };
 
 struct FxStep {
     FxKind kind = FxKind::Gain;
@@ -15,6 +15,25 @@ struct FxStep {
     float eqMidDb = 0.f;
     float eqHighDb = 0.f;
     float eqAirDb = 0.f;
+    // compressor
+    float compThresholdDb = -18.f;
+    float compRatio = 4.f;
+    float compAttackMs = 10.f;
+    float compReleaseMs = 100.f;
+    float compMakeupDb = 0.f;
+    // pan: -1 = full left, 0 = center, +1 = full right
+    float pan = 0.f;
+    // high-pass / low-pass cutoff Hz; 0 = bypass
+    float hpHz = 0.f;
+    float lpHz = 0.f;
+    // limiter
+    float limitThresholdDb = -1.f;
+    float limitReleaseMs = 50.f;
+    // gate
+    float gateThresholdDb = -40.f;
+    float gateAttackMs = 5.f;
+    float gateReleaseMs = 100.f;
+    float gateRangeDb = -60.f; // gain when closed
 };
 
 struct Biquad {
@@ -23,12 +42,15 @@ struct Biquad {
     void setPeaking(float sr, float freq, float q, float gainDb);
     void setLowShelf(float sr, float freq, float gainDb);
     void setHighShelf(float sr, float freq, float gainDb);
+    void setHighPass(float sr, float freq, float q);
+    void setLowPass(float sr, float freq, float q);
     float process(float x);
     void reset() { z1 = z2 = 0; }
 };
 
 constexpr int kEqControls = 5;
 constexpr int kEqInternal = 12;
+constexpr int kWaveCapture = 128;
 
 struct FxChain {
     std::mutex mu;
@@ -40,7 +62,42 @@ struct FxChain {
         float meanDb = 0.f;
         float meanLin = 1.f;
     };
+    struct CompState {
+        float env = 0.f;
+        float thresholdDb = 1e9f;
+        float ratio = 0.f;
+        float attackMs = 0.f;
+        float releaseMs = 0.f;
+        float makeupDb = 0.f;
+    };
+    struct FilterState {
+        Biquad L{};
+        Biquad R{};
+        float hz = -1.f;
+    };
+    struct LimitState {
+        float env = 0.f;
+        float thresholdDb = 1e9f;
+        float releaseMs = 0.f;
+    };
+    struct GateState {
+        float env = 0.f;
+        float gain = 1.f;
+        float thresholdDb = 1e9f;
+        float attackMs = 0.f;
+        float releaseMs = 0.f;
+        float rangeDb = 0.f;
+    };
+    struct WaveState {
+        float samples[kWaveCapture]{};
+    };
     std::vector<EqState> eqStates;
+    std::vector<CompState> compStates;
+    std::vector<FilterState> hpStates;
+    std::vector<FilterState> lpStates;
+    std::vector<LimitState> limitStates;
+    std::vector<GateState> gateStates;
+    std::vector<WaveState> waveStates;
     float sampleRate = 48000.f;
 
     void prepare(float sr);

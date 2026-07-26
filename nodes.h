@@ -9,6 +9,13 @@ enum class NodeKind {
     Output = 1,
     Gain = 2,
     Eq = 3,
+    Comp = 4,
+    Pan = 5,
+    HighPass = 6,
+    Waveform = 7,
+    LowPass = 8,
+    Limit = 9,
+    Gate = 10,
 };
 
 enum class NodePickMode {
@@ -33,6 +40,24 @@ struct GraphNode {
     float eqMidDb = 0.f;
     float eqHighDb = 0.f;
     float eqAirDb = 0.f;   // right end
+
+    float compThresholdDb = -18.f;
+    float compRatio = 4.f;
+    float compAttackMs = 10.f;
+    float compReleaseMs = 100.f;
+    float compMakeupDb = 0.f;
+
+    float pan = 0.f;   // -1 .. +1
+    float hpHz = 0.f;  // 0 = off
+    float lpHz = 0.f;  // 0 = off
+
+    float limitThresholdDb = -1.f;
+    float limitReleaseMs = 50.f;
+
+    float gateThresholdDb = -40.f;
+    float gateAttackMs = 5.f;
+    float gateReleaseMs = 100.f;
+    float gateRangeDb = -60.f;
 };
 
 struct NodeBehavior {
@@ -89,10 +114,15 @@ struct AudioRoute {
 constexpr int kNodeW = 240;
 constexpr int kNodeH = 110;
 constexpr int kEqNodeH = 220;
+constexpr int kKnobNodeH = 128;
+constexpr int kCompNodeH = 148;
+constexpr int kGateNodeH = 148;
+constexpr int kWaveNodeH = 160;
 constexpr int kPortR = 7;
 constexpr int kWireHitPx = 10;
 constexpr float kEqMinDb = -12.f;
 constexpr float kEqMaxDb = 12.f;
+constexpr int kWavePlotSamples = 128;
 
 const std::vector<NodeTypeInfo>& nodeCatalog();
 const NodeTypeInfo& nodeType(NodeKind kind);
@@ -105,6 +135,7 @@ RECT nodeRectScreen(const GraphNode& n, const NodeView& view);
 RECT nodeFieldRectScreen(const GraphNode& n, const NodeView& view);
 RECT eqCurveRectScreen(const GraphNode& n, const NodeView& view);
 RECT eqPresetRectScreen(const GraphNode& n, const NodeView& view);
+RECT wavePlotRectScreen(const GraphNode& n, const NodeView& view);
 RECT nodeMeterRectScreen(const GraphNode& n, const NodeView& view);
 POINT outPortWorld(const GraphNode& n);
 POINT inPortWorld(const GraphNode& n);
@@ -121,6 +152,16 @@ int eqBandAt(const GraphNode& n, const NodeView& view, int sx, int sy); // 0..4 
 int hitEqHandleAt(const NodeGraph& g, const NodeView& view, int sx, int sy, int* outBand);
 void applyEqBandFromY(GraphNode& n, int band, const NodeView& view, int sy);
 bool nodeHasPicker(const GraphNode& n);
+
+int nodeKnobCount(const GraphNode& n);
+RECT nodeKnobRectScreen(const GraphNode& n, const NodeView& view, int knob);
+int hitKnobAt(const NodeGraph& g, const NodeView& view, int sx, int sy, int* outKnob);
+float knobNorm(const GraphNode& n, int knob); // 0..1
+void applyKnobNorm(GraphNode& n, int knob, float norm);
+std::wstring knobCaption(const GraphNode& n, int knob);
+std::wstring knobValueText(const GraphNode& n, int knob);
+
+bool copyNodeWaveform(const NodeGraph& g, int nodeIdx, float* out, int count);
 
 GraphNode makeNode(NodeKind kind, int worldX, int worldY);
 void deleteNode(NodeGraph& g, int idx);
@@ -147,7 +188,7 @@ int hitOutPortAt(const NodeGraph& g, const NodeView& view, int sx, int sy);
 int hitInPortAt(const NodeGraph& g, const NodeView& view, int sx, int sy);
 
 void drawNode(HDC hdc, const GraphNode& n, const NodeView& view, const NodeFonts& fonts,
-              bool flowing, float meterIn, float meterOut);
+              bool flowing, float meterIn, float meterOut, const NodeGraph* graph, int nodeIdx);
 void drawWire(HDC hdc, POINT aScreen, POINT bScreen, bool flowing, float audioLevel);
 void drawPort(HDC hdc, POINT pScreen, bool hot);
 void drawGraph(HDC hdc, const NodeGraph& g, const NodeView& view, const NodeFonts& fonts,
