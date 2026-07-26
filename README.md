@@ -41,6 +41,13 @@ That makes `ToneGraph.exe`.
 3. Wire them together, pick an app and an output device
 4. Hit **Run**
 
+### Delete
+
+- **Node:** right-click it → **Delete**
+- **Wire:** right-click the connection to remove it
+
+If you delete a node or wire while streaming, Tone Graph stops automatically.
+
 ## Note
 
 Because of how VB-Cable works, if Tone Graph closes abruptly (crash, Task Manager, etc.) an app may stay parked on the cable. Go to Windows **Settings → System → Sound** (or the volume mixer) and set that app’s output back to your default device.
