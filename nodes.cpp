@@ -1025,11 +1025,12 @@ bool addLink(NodeGraph& g, int from, int to, int fromPort, int toPort) {
     if (from == to) return false;
     if (fromPort < 0 || fromPort >= nodeOutPortCount(g.nodes[from])) return false;
     if (toPort < 0 || toPort >= nodeInPortCount(g.nodes[to])) return false;
-    for (auto& c : g.links)
-        if (c.from == from && c.to == to && c.fromPort == fromPort && c.toPort == toPort) return false;
-    // one wire per destination port (Merge L/R each take one)
-    for (auto& c : g.links)
+    for (auto& c : g.links) {
+        // one wire per output port (no fan-out)
+        if (c.from == from && c.fromPort == fromPort) return false;
+        // one wire per input port (no fan-in; Merge L/R each take one)
         if (c.to == to && c.toPort == toPort) return false;
+    }
     g.links.push_back({ from, to, fromPort, toPort });
     return true;
 }

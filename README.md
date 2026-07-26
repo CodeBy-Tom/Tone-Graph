@@ -24,9 +24,12 @@ Route per-app Windows audio through a simple node graph (Input → effects → O
 
 - Windows
 - [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) (used to park/capture app audio)
-- Visual Studio 2019+ with C++ tools (for `cl` / `vcvars64`)
 
 ## Build
+
+Only needed if you build from source (not for the release `.exe`):
+
+- Visual Studio 2019+ with C++ tools (for `cl` / `vcvars64`)
 
 ```bat
 build.bat

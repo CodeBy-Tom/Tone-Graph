@@ -719,13 +719,21 @@ static void onLButtonUp(HWND hwnd, int x, int y) {
         if (fromOut) {
             int toPort = 0;
             int to = hitInPortAt(g_ui.graph, g_ui.view, x, y, &toPort);
-            if (to >= 0 && addLink(g_ui.graph, fromNode, to, fromPort, toPort))
-                setStatus(L"Connected. Choose devices, then Run.");
+            if (to >= 0) {
+                if (addLink(g_ui.graph, fromNode, to, fromPort, toPort))
+                    setStatus(L"Connected. Choose devices, then Run.");
+                else
+                    setStatus(L"Port already wired - disconnect first.");
+            }
         } else {
             int outPort = 0;
             int from = hitOutPortAt(g_ui.graph, g_ui.view, x, y, &outPort);
-            if (from >= 0 && addLink(g_ui.graph, from, fromNode, outPort, fromPort))
-                setStatus(L"Connected. Choose devices, then Run.");
+            if (from >= 0) {
+                if (addLink(g_ui.graph, from, fromNode, outPort, fromPort))
+                    setStatus(L"Connected. Choose devices, then Run.");
+                else
+                    setStatus(L"Port already wired - disconnect first.");
+            }
         }
         InvalidateRect(hwnd, nullptr, FALSE);
     }
