@@ -1,0 +1,53 @@
+# Build junk
+*.obj
+*.o
+*.exe
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+*.idb
+*.ipdb
+*.iobj
+*.sbr
+*.bsc
+*.res
+*.pch
+*.map
+
+# VS
+.vs/
+*.vcxproj.user
+*.suo
+*.user
+*.aps
+*.ncb
+*.opendb
+*.VC.db
+*.VC.VC.opendb
+ipch/
+x64/
+x86/
+Debug/
+Release/
+[Bb]in/
+[Oo]bj/
+
+# Editor
+.cursor/
+*.code-workspace
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Temp
+*.log
+*.tmp
+*.temp
+*~
+
+# Scratch
+testing.cpp
