@@ -386,6 +386,32 @@ static const NodeBehavior kGateBehavior = {
     false, false, true
 };
 
+// SPLIT / MERGE (L/R routing)
+
+static void splitInit(GraphNode& n) {
+    n.sel = -1;
+    n.appName.clear(); n.appPid = 0; n.deviceId.clear();
+    clearFxParams(n);
+}
+static std::wstring splitLabel(const GraphNode&) { return L"L / R split"; }
+static const NodeBehavior kSplitBehavior = {
+    splitInit, noopRebind, splitLabel, alwaysReady,
+    noPickMode, noPickCount, noPickLabel, noApplyPick,
+    false, false, false
+};
+
+static void mergeInit(GraphNode& n) {
+    n.sel = -1;
+    n.appName.clear(); n.appPid = 0; n.deviceId.clear();
+    clearFxParams(n);
+}
+static std::wstring mergeLabel(const GraphNode&) { return L"L / R merge"; }
+static const NodeBehavior kMergeBehavior = {
+    mergeInit, noopRebind, mergeLabel, alwaysReady,
+    noPickMode, noPickCount, noPickLabel, noApplyPick,
+    false, false, false
+};
+
 // WAVEFORM (pass-through analyzer)
 
 static void waveInit(GraphNode& n) {
@@ -417,6 +443,8 @@ static const NodeTypeInfo kCatalog[] = {
     { NodeKind::LowPass,  L"lopass",   L"Low-pass",   L"LP",     true,  true,  &kLpBehavior     },
     { NodeKind::Limit,    L"limit",    L"Limiter",    L"LIMIT",  true,  true,  &kLimitBehavior  },
     { NodeKind::Gate,     L"gate",     L"Gate",       L"GATE",   true,  true,  &kGateBehavior   },
+    { NodeKind::Split,    L"split",    L"Split L/R",  L"SPLIT",  true,  true,  &kSplitBehavior  },
+    { NodeKind::Merge,    L"merge",    L"Merge L/R",  L"MERGE",  true,  true,  &kMergeBehavior  },
     { NodeKind::Waveform, L"wave",     L"Waveform",   L"WAVE",   true,  true,  &kWaveBehavior   },
 };
 
@@ -447,6 +475,8 @@ int nodeHeight(const GraphNode& n) {
     case NodeKind::Comp:
     case NodeKind::Gate: return kCompNodeH;
     case NodeKind::Waveform: return kWaveNodeH;
+    case NodeKind::Split:
+    case NodeKind::Merge: return kSplitNodeH;
     case NodeKind::Gain:
     case NodeKind::Pan:
     case NodeKind::HighPass:
@@ -454,6 +484,16 @@ int nodeHeight(const GraphNode& n) {
     case NodeKind::Limit: return kKnobNodeH;
     default: return kNodeH;
     }
+}
+
+int nodeInPortCount(const GraphNode& n) {
+    if (n.kind == NodeKind::Merge) return 2;
+    return nodeType(n.kind).hasInPort ? 1 : 0;
+}
+
+int nodeOutPortCount(const GraphNode& n) {
+    if (n.kind == NodeKind::Split) return 2;
+    return nodeType(n.kind).hasOutPort ? 1 : 0;
 }
 
 POINT worldToScreen(POINT w, const NodeView& view) {
@@ -503,20 +543,43 @@ static bool nodeUsesTitlePorts(const GraphNode& n) {
         || n.kind == NodeKind::Comp
         || n.kind == NodeKind::Limit
         || n.kind == NodeKind::Gate
-        || n.kind == NodeKind::Waveform;
+        || n.kind == NodeKind::Waveform
+        || n.kind == NodeKind::Split
+        || n.kind == NodeKind::Merge;
 }
 
-POINT outPortWorld(const GraphNode& n) {
-    // ports stay in the title so they don't steal knob / EQ handle clicks
-    const int cy = nodeUsesTitlePorts(n) ? 18 : nodeHeight(n) / 2;
+POINT outPortWorld(const GraphNode& n, int port) {
+    const int h = nodeHeight(n);
+    int cy;
+    if (n.kind == NodeKind::Split) {
+        cy = (port == 0) ? (h / 3) : (2 * h / 3);
+    } else if (nodeUsesTitlePorts(n) && n.kind != NodeKind::Merge) {
+        cy = 18;
+    } else {
+        cy = h / 2;
+    }
     return { n.x + kNodeW, n.y + cy };
 }
-POINT inPortWorld(const GraphNode& n) {
-    const int cy = nodeUsesTitlePorts(n) ? 18 : nodeHeight(n) / 2;
+POINT inPortWorld(const GraphNode& n, int port) {
+    const int h = nodeHeight(n);
+    int cy;
+    if (n.kind == NodeKind::Merge) {
+        cy = (port == 0) ? (h / 3) : (2 * h / 3);
+    } else if (nodeUsesTitlePorts(n) && n.kind != NodeKind::Split) {
+        cy = 18;
+    } else if (n.kind == NodeKind::Split) {
+        cy = h / 2;
+    } else {
+        cy = h / 2;
+    }
     return { n.x, n.y + cy };
 }
-POINT outPortScreen(const GraphNode& n, const NodeView& view) { return worldToScreen(outPortWorld(n), view); }
-POINT inPortScreen(const GraphNode& n, const NodeView& view) { return worldToScreen(inPortWorld(n), view); }
+POINT outPortScreen(const GraphNode& n, const NodeView& view, int port) {
+    return worldToScreen(outPortWorld(n, port), view);
+}
+POINT inPortScreen(const GraphNode& n, const NodeView& view, int port) {
+    return worldToScreen(inPortWorld(n, port), view);
+}
 
 bool hitRect(const RECT& r, int x, int y) {
     return x >= r.left && x < r.right && y >= r.top && y < r.bottom;
@@ -956,15 +1019,18 @@ void deleteNode(NodeGraph& g, int idx) {
     g.nodes.erase(g.nodes.begin() + idx);
 }
 
-bool addLink(NodeGraph& g, int from, int to) {
+bool addLink(NodeGraph& g, int from, int to, int fromPort, int toPort) {
     if (from < 0 || to < 0) return false;
     if (from >= (int)g.nodes.size() || to >= (int)g.nodes.size()) return false;
     if (from == to) return false;
-    if (!nodeType(g.nodes[from].kind).hasOutPort) return false;
-    if (!nodeType(g.nodes[to].kind).hasInPort) return false;
+    if (fromPort < 0 || fromPort >= nodeOutPortCount(g.nodes[from])) return false;
+    if (toPort < 0 || toPort >= nodeInPortCount(g.nodes[to])) return false;
     for (auto& c : g.links)
-        if (c.from == from && c.to == to) return false;
-    g.links.push_back({ from, to });
+        if (c.from == from && c.to == to && c.fromPort == fromPort && c.toPort == toPort) return false;
+    // one wire per destination port (Merge L/R each take one)
+    for (auto& c : g.links)
+        if (c.to == to && c.toPort == toPort) return false;
+    g.links.push_back({ from, to, fromPort, toPort });
     return true;
 }
 
@@ -980,19 +1046,77 @@ bool nodeCanRun(const GraphNode& n) {
     return nodeBehavior(n.kind).canRun(n);
 }
 
-static void collectOutgoing(const NodeGraph& g, int from, std::vector<int>& tos) {
-    tos.clear();
+static void collectOutgoing(const NodeGraph& g, int from, int fromPort, std::vector<Connection>& outs) {
+    outs.clear();
     for (auto& c : g.links)
-        if (c.from == from) tos.push_back(c.to);
+        if (c.from == from && c.fromPort == fromPort) outs.push_back(c);
+}
+
+static bool walkBranchToMerge(const NodeGraph& g, const Connection& first,
+                              int expectedMergePort, int& outMerge, std::vector<int>& effects) {
+    effects.clear();
+    outMerge = -1;
+    int cur = first.to;
+    int inPort = first.toPort;
+    std::set<int> visiting;
+    while (cur >= 0 && cur < (int)g.nodes.size()) {
+        if (visiting.count(cur)) return false;
+        visiting.insert(cur);
+        const auto kind = g.nodes[cur].kind;
+        if (kind == NodeKind::Merge) {
+            if (inPort != expectedMergePort) return false;
+            outMerge = cur;
+            return true;
+        }
+        if (kind == NodeKind::Split || nodeBehavior(kind).isAudioSink || nodeBehavior(kind).isAudioSource)
+            return false;
+        if (nodeBehavior(kind).isEffect)
+            effects.push_back(cur);
+
+        std::vector<Connection> outs;
+        collectOutgoing(g, cur, 0, outs);
+        if (outs.size() != 1) return false;
+        inPort = outs[0].toPort;
+        cur = outs[0].to;
+    }
+    return false;
+}
+
+static bool walkPostMerge(const NodeGraph& g, int merge, int& sink, std::vector<int>& post) {
+    post.clear();
+    sink = -1;
+    std::vector<Connection> outs;
+    collectOutgoing(g, merge, 0, outs);
+    if (outs.size() != 1) return false;
+    int cur = outs[0].to;
+    std::set<int> visiting;
+    while (cur >= 0 && cur < (int)g.nodes.size()) {
+        if (visiting.count(cur)) return false;
+        visiting.insert(cur);
+        const auto& beh = nodeBehavior(g.nodes[cur].kind);
+        if (beh.isAudioSink) {
+            sink = cur;
+            return true;
+        }
+        if (g.nodes[cur].kind == NodeKind::Split || g.nodes[cur].kind == NodeKind::Merge)
+            return false;
+        if (beh.isEffect)
+            post.push_back(cur);
+        collectOutgoing(g, cur, 0, outs);
+        if (outs.size() != 1) return false;
+        cur = outs[0].to;
+    }
+    return false;
 }
 
 static void walkRoutes(const NodeGraph& g, int cur, AudioRoute curRoute,
                        std::vector<AudioRoute>& out, std::set<int>& visiting) {
-    // DFS from input through effects until we hit an output
     if (visiting.count(cur)) return;
     visiting.insert(cur);
 
-    const auto& beh = nodeBehavior(g.nodes[cur].kind);
+    const auto kind = g.nodes[cur].kind;
+    const auto& beh = nodeBehavior(kind);
+
     if (beh.isAudioSink) {
         curRoute.sink = cur;
         if (curRoute.source >= 0) out.push_back(curRoute);
@@ -1000,14 +1124,48 @@ static void walkRoutes(const NodeGraph& g, int cur, AudioRoute curRoute,
         return;
     }
 
+    if (kind == NodeKind::Split) {
+        // diamond: Split → L branch + R branch → same Merge → Output
+        AudioRoute r = curRoute;
+        r.hasSplit = true;
+        r.splitNode = cur;
+        r.preEffects = curRoute.effects;
+        r.effects.clear();
+
+        std::vector<Connection> lOuts, rOuts;
+        collectOutgoing(g, cur, 0, lOuts);
+        collectOutgoing(g, cur, 1, rOuts);
+        if (lOuts.size() == 1 && rOuts.size() == 1) {
+            int mergeL = -1, mergeR = -1;
+            if (walkBranchToMerge(g, lOuts[0], 0, mergeL, r.leftEffects)
+                && walkBranchToMerge(g, rOuts[0], 1, mergeR, r.rightEffects)
+                && mergeL >= 0 && mergeL == mergeR) {
+                r.mergeNode = mergeL;
+                int sink = -1;
+                if (walkPostMerge(g, mergeL, sink, r.postEffects) && sink >= 0) {
+                    r.sink = sink;
+                    out.push_back(r);
+                }
+            }
+        }
+        visiting.erase(cur);
+        return;
+    }
+
+    if (kind == NodeKind::Merge) {
+        // Merge without matching Split walk — ignore (handled via Split)
+        visiting.erase(cur);
+        return;
+    }
+
     if (beh.isEffect)
         curRoute.effects.push_back(cur);
 
-    std::vector<int> next;
-    collectOutgoing(g, cur, next);
-    for (int to : next) {
-        if (to < 0 || to >= (int)g.nodes.size()) continue;
-        walkRoutes(g, to, curRoute, out, visiting);
+    std::vector<Connection> next;
+    collectOutgoing(g, cur, 0, next);
+    for (auto& c : next) {
+        if (c.to < 0 || c.to >= (int)g.nodes.size()) continue;
+        walkRoutes(g, c.to, curRoute, out, visiting);
     }
 
     if (beh.isEffect && !curRoute.effects.empty())
@@ -1022,11 +1180,11 @@ std::vector<AudioRoute> findAudioRoutes(const NodeGraph& g) {
         AudioRoute seed;
         seed.source = i;
         std::set<int> visiting;
-        std::vector<int> next;
-        collectOutgoing(g, i, next);
-        for (int to : next) {
-            if (to < 0 || to >= (int)g.nodes.size()) continue;
-            walkRoutes(g, to, seed, routes, visiting);
+        std::vector<Connection> next;
+        collectOutgoing(g, i, 0, next);
+        for (auto& c : next) {
+            if (c.to < 0 || c.to >= (int)g.nodes.size()) continue;
+            walkRoutes(g, c.to, seed, routes, visiting);
         }
     }
     return routes;
@@ -1037,15 +1195,29 @@ bool routeRunnable(const NodeGraph& g, const AudioRoute& route) {
     if (route.source >= (int)g.nodes.size() || route.sink >= (int)g.nodes.size()) return false;
     if (!nodeCanRun(g.nodes[route.source])) return false;
     if (!nodeCanRun(g.nodes[route.sink])) return false;
-    for (int ei : route.effects) {
-        if (ei < 0 || ei >= (int)g.nodes.size()) return false;
-        if (!nodeCanRun(g.nodes[ei])) return false;
+
+    auto checkList = [&](const std::vector<int>& list) {
+        for (int ei : list) {
+            if (ei < 0 || ei >= (int)g.nodes.size()) return false;
+            if (!nodeCanRun(g.nodes[ei])) return false;
+        }
+        return true;
+    };
+
+    if (route.hasSplit) {
+        if (route.splitNode < 0 || route.mergeNode < 0) return false;
+        if (!checkList(route.preEffects)) return false;
+        if (!checkList(route.leftEffects)) return false;
+        if (!checkList(route.rightEffects)) return false;
+        if (!checkList(route.postEffects)) return false;
+        return true;
     }
-    return true;
+    return checkList(route.effects);
 }
 
-static FxStep stepFromNode(const GraphNode& n) {
+static FxStep stepFromNode(const GraphNode& n, FxChannel channel = FxChannel::Both) {
     FxStep s;
+    s.channel = channel;
     switch (n.kind) {
     case NodeKind::Gain:
         s.kind = FxKind::Gain;
@@ -1112,8 +1284,20 @@ bool buildJobFromRoute(const NodeGraph& g, const AudioRoute& route, Job& outJob,
     outJob.cableName = g_cableName;
     outJob.forceLoopback = forceLoopback;
     outJob.fx = std::make_shared<FxChain>();
-    for (int ei : route.effects)
-        outJob.fx->steps.push_back(stepFromNode(g.nodes[ei]));
+
+    auto pushList = [&](const std::vector<int>& list, FxChannel ch) {
+        for (int ei : list)
+            outJob.fx->steps.push_back(stepFromNode(g.nodes[ei], ch));
+    };
+
+    if (route.hasSplit) {
+        pushList(route.preEffects, FxChannel::Both);
+        pushList(route.leftEffects, FxChannel::Left);
+        pushList(route.rightEffects, FxChannel::Right);
+        pushList(route.postEffects, FxChannel::Both);
+    } else {
+        pushList(route.effects, FxChannel::Both);
+    }
     return true;
 }
 
@@ -1121,12 +1305,50 @@ void syncLiveFxFromGraph(const NodeGraph& g) {
     std::lock_guard lock(g_liveFxMu);
     for (auto& b : g_liveFx) {
         if (!b.fx) continue;
+        // Rebuild from the live route topology stored as effectNodes:
+        // convention: nodes listed in process order; channel inferred by re-finding routes.
+        // Simpler: re-find matching route by source/sink in effectNodes path.
         std::vector<FxStep> steps;
-        steps.reserve(b.effectNodes.size());
-        for (int ei : b.effectNodes) {
-            if (ei < 0 || ei >= (int)g.nodes.size()) continue;
-            if (!nodeBehavior(g.nodes[ei].kind).isEffect) continue;
-            steps.push_back(stepFromNode(g.nodes[ei]));
+        for (auto& r : findAudioRoutes(g)) {
+            if (!routeRunnable(g, r)) continue;
+            auto matches = [&]() {
+                // binding lists every effect node on that route
+                std::vector<int> want;
+                if (r.hasSplit) {
+                    want.insert(want.end(), r.preEffects.begin(), r.preEffects.end());
+                    want.insert(want.end(), r.leftEffects.begin(), r.leftEffects.end());
+                    want.insert(want.end(), r.rightEffects.begin(), r.rightEffects.end());
+                    want.insert(want.end(), r.postEffects.begin(), r.postEffects.end());
+                } else {
+                    want = r.effects;
+                }
+                if (want.size() != b.effectNodes.size()) return false;
+                for (size_t i = 0; i < want.size(); ++i)
+                    if (want[i] != b.effectNodes[i]) return false;
+                return true;
+            };
+            if (!matches()) continue;
+            auto pushList = [&](const std::vector<int>& list, FxChannel ch) {
+                for (int ei : list)
+                    steps.push_back(stepFromNode(g.nodes[ei], ch));
+            };
+            if (r.hasSplit) {
+                pushList(r.preEffects, FxChannel::Both);
+                pushList(r.leftEffects, FxChannel::Left);
+                pushList(r.rightEffects, FxChannel::Right);
+                pushList(r.postEffects, FxChannel::Both);
+            } else {
+                pushList(r.effects, FxChannel::Both);
+            }
+            break;
+        }
+        if (steps.empty()) {
+            // fallback: both-channel steps in listed order
+            for (int ei : b.effectNodes) {
+                if (ei < 0 || ei >= (int)g.nodes.size()) continue;
+                if (!nodeBehavior(g.nodes[ei].kind).isEffect) continue;
+                steps.push_back(stepFromNode(g.nodes[ei]));
+            }
         }
         b.fx->setSteps(std::move(steps));
     }
@@ -1137,13 +1359,33 @@ bool linkOnRunnableRoute(const NodeGraph& g, int linkIdx) {
     auto& link = g.links[linkIdx];
     for (auto& r : findAudioRoutes(g)) {
         if (!routeRunnable(g, r)) continue;
-        // is this wire on a live Input→…→Output path?
         std::vector<int> path;
         path.push_back(r.source);
-        path.insert(path.end(), r.effects.begin(), r.effects.end());
-        path.push_back(r.sink);
-        for (size_t i = 0; i + 1 < path.size(); ++i)
-            if (link.from == path[i] && link.to == path[i + 1]) return true;
+        if (r.hasSplit) {
+            path.insert(path.end(), r.preEffects.begin(), r.preEffects.end());
+            path.push_back(r.splitNode);
+            // L branch
+            std::vector<int> lpath = path;
+            lpath.insert(lpath.end(), r.leftEffects.begin(), r.leftEffects.end());
+            lpath.push_back(r.mergeNode);
+            lpath.insert(lpath.end(), r.postEffects.begin(), r.postEffects.end());
+            lpath.push_back(r.sink);
+            for (size_t i = 0; i + 1 < lpath.size(); ++i)
+                if (link.from == lpath[i] && link.to == lpath[i + 1]) return true;
+            // R branch
+            std::vector<int> rpath = path;
+            rpath.insert(rpath.end(), r.rightEffects.begin(), r.rightEffects.end());
+            rpath.push_back(r.mergeNode);
+            rpath.insert(rpath.end(), r.postEffects.begin(), r.postEffects.end());
+            rpath.push_back(r.sink);
+            for (size_t i = 0; i + 1 < rpath.size(); ++i)
+                if (link.from == rpath[i] && link.to == rpath[i + 1]) return true;
+        } else {
+            path.insert(path.end(), r.effects.begin(), r.effects.end());
+            path.push_back(r.sink);
+            for (size_t i = 0; i + 1 < path.size(); ++i)
+                if (link.from == path[i] && link.to == path[i + 1]) return true;
+        }
     }
     return false;
 }
@@ -1184,8 +1426,8 @@ int hitWireAt(const NodeGraph& g, const NodeView& view, int sx, int sy) {
         auto& c = g.links[i];
         if (c.from < 0 || c.to < 0) continue;
         if (c.from >= (int)g.nodes.size() || c.to >= (int)g.nodes.size()) continue;
-        POINT a = outPortScreen(g.nodes[c.from], view);
-        POINT b = inPortScreen(g.nodes[c.to], view);
+        POINT a = outPortScreen(g.nodes[c.from], view, c.fromPort);
+        POINT b = inPortScreen(g.nodes[c.to], view, c.toPort);
         POINT c1, c2; bezierControls(a, b, c1, c2);
         for (int s = 0; s <= 24; ++s) {
             float d = dist2(bezierAt(a, c1, c2, b, s / 24.f), cur);
@@ -1195,18 +1437,30 @@ int hitWireAt(const NodeGraph& g, const NodeView& view, int sx, int sy) {
     return best;
 }
 
-int hitOutPortAt(const NodeGraph& g, const NodeView& view, int sx, int sy) {
+int hitOutPortAt(const NodeGraph& g, const NodeView& view, int sx, int sy, int* outPort) {
+    if (outPort) *outPort = 0;
     for (int i = (int)g.nodes.size() - 1; i >= 0; --i) {
-        if (!nodeType(g.nodes[i].kind).hasOutPort) continue;
-        if (hitPortAt(outPortScreen(g.nodes[i], view), sx, sy)) return i;
+        const int nPorts = nodeOutPortCount(g.nodes[i]);
+        for (int p = 0; p < nPorts; ++p) {
+            if (hitPortAt(outPortScreen(g.nodes[i], view, p), sx, sy)) {
+                if (outPort) *outPort = p;
+                return i;
+            }
+        }
     }
     return -1;
 }
 
-int hitInPortAt(const NodeGraph& g, const NodeView& view, int sx, int sy) {
+int hitInPortAt(const NodeGraph& g, const NodeView& view, int sx, int sy, int* outPort) {
+    if (outPort) *outPort = 0;
     for (int i = (int)g.nodes.size() - 1; i >= 0; --i) {
-        if (!nodeType(g.nodes[i].kind).hasInPort) continue;
-        if (hitPortAt(inPortScreen(g.nodes[i], view), sx, sy)) return i;
+        const int nPorts = nodeInPortCount(g.nodes[i]);
+        for (int p = 0; p < nPorts; ++p) {
+            if (hitPortAt(inPortScreen(g.nodes[i], view, p), sx, sy)) {
+                if (outPort) *outPort = p;
+                return i;
+            }
+        }
     }
     return -1;
 }
@@ -1445,7 +1699,34 @@ void drawNode(HDC hdc, const GraphNode& n, const NodeView& view, const NodeFonts
     RECT title{ r.left + 14, r.top + 10, r.right - 14, r.top + 30 };
     DrawTextW(hdc, t.title, -1, &title, DT_LEFT | DT_SINGLELINE);
 
-    if (n.kind == NodeKind::Eq) {
+    // port labels for Split / Merge
+    if (n.kind == NodeKind::Split || n.kind == NodeKind::Merge) {
+        SetTextColor(hdc, kMuted);
+        if (fonts.ui) SelectObject(hdc, fonts.ui);
+        if (n.kind == NodeKind::Split) {
+            POINT p0 = outPortScreen(n, view, 0);
+            POINT p1 = outPortScreen(n, view, 1);
+            RECT l0{ p0.x - 28, p0.y - 8, p0.x - 10, p0.y + 8 };
+            RECT l1{ p1.x - 28, p1.y - 8, p1.x - 10, p1.y + 8 };
+            DrawTextW(hdc, L"L", -1, &l0, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+            DrawTextW(hdc, L"R", -1, &l1, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+            RECT body{ r.left + 14, r.top + 40, r.right - 14, r.bottom - 14 };
+            SetTextColor(hdc, kText);
+            DrawTextW(hdc, L"Split stereo \u2192 L / R", -1, &body,
+                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        } else {
+            POINT p0 = inPortScreen(n, view, 0);
+            POINT p1 = inPortScreen(n, view, 1);
+            RECT l0{ p0.x + 10, p0.y - 8, p0.x + 28, p0.y + 8 };
+            RECT l1{ p1.x + 10, p1.y - 8, p1.x + 28, p1.y + 8 };
+            DrawTextW(hdc, L"L", -1, &l0, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            DrawTextW(hdc, L"R", -1, &l1, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            RECT body{ r.left + 36, r.top + 40, r.right - 14, r.bottom - 14 };
+            SetTextColor(hdc, kText);
+            DrawTextW(hdc, L"Merge L / R \u2192 stereo", -1, &body,
+                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
+    } else if (n.kind == NodeKind::Eq) {
         drawEqCurve(hdc, n, view);
         RECT chip = eqPresetRectScreen(n, view);
         fillRound(hdc, chip, kSelect, kNodeEdge);
@@ -1484,8 +1765,10 @@ void drawNode(HDC hdc, const GraphNode& n, const NodeView& view, const NodeFonts
         drawVolumeMeter(hdc, nodeMeterRectScreen(n, view), 0.f);
     }
 
-    if (t.hasOutPort) drawPort(hdc, outPortScreen(n, view), false);
-    if (t.hasInPort) drawPort(hdc, inPortScreen(n, view), false);
+    for (int p = 0; p < nodeOutPortCount(n); ++p)
+        drawPort(hdc, outPortScreen(n, view, p), false);
+    for (int p = 0; p < nodeInPortCount(n); ++p)
+        drawPort(hdc, inPortScreen(n, view, p), false);
 }
 
 void drawGraph(HDC hdc, const NodeGraph& g, const NodeView& view, const NodeFonts& fonts,
@@ -1495,7 +1778,8 @@ void drawGraph(HDC hdc, const NodeGraph& g, const NodeView& view, const NodeFont
         if (c.from < 0 || c.to < 0) continue;
         if (c.from >= (int)g.nodes.size() || c.to >= (int)g.nodes.size()) continue;
         const bool flow = flowing && linkOnRunnableRoute(g, i);
-        drawWire(hdc, outPortScreen(g.nodes[c.from], view), inPortScreen(g.nodes[c.to], view), flow, audioLevel);
+        drawWire(hdc, outPortScreen(g.nodes[c.from], view, c.fromPort),
+                 inPortScreen(g.nodes[c.to], view, c.toPort), flow, audioLevel);
     }
     for (int i = 0; i < (int)g.nodes.size(); ++i)
         drawNode(hdc, g.nodes[i], view, fonts, flowing, meterIn, meterOut, &g, i);
@@ -1504,8 +1788,8 @@ void drawGraph(HDC hdc, const NodeGraph& g, const NodeView& view, const NodeFont
         for (int i = 0; i < (int)g.links.size(); ++i) {
             if (!linkOnRunnableRoute(g, i)) continue;
             auto& c = g.links[i];
-            drawPort(hdc, outPortScreen(g.nodes[c.from], view), true);
-            drawPort(hdc, inPortScreen(g.nodes[c.to], view), true);
+            drawPort(hdc, outPortScreen(g.nodes[c.from], view, c.fromPort), true);
+            drawPort(hdc, inPortScreen(g.nodes[c.to], view, c.toPort), true);
         }
     }
 }

@@ -6,8 +6,15 @@
 
 enum class FxKind { Gain, Eq, Comp, Pan, HighPass, Waveform, LowPass, Limit, Gate };
 
+enum class FxChannel : int {
+    Both = 0,
+    Left = 1,
+    Right = 2,
+};
+
 struct FxStep {
     FxKind kind = FxKind::Gain;
+    FxChannel channel = FxChannel::Both;
     float gainDb = 0.f;
     // five knobs on the EQ curve
     float eqSubDb = 0.f;

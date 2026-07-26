@@ -2,7 +2,7 @@
 
 Route per-app Windows audio through a simple node graph (Input → effects → Output).
 
-Effects: Gain, EQ, Compressor, Pan, High-pass, Low-pass, Limiter, Gate, Waveform.
+Effects: Gain, EQ, Compressor, Pan, High-pass, Low-pass, Limiter, Gate, Waveform, Split L/R, Merge L/R.
 
 ## Needs
 

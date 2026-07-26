@@ -336,31 +336,42 @@ void FxChain::setSteps(std::vector<FxStep> next) {
     rebuildStatefulSteps(*this, false);
 }
 
+static bool wantL(FxChannel ch) { return ch == FxChannel::Both || ch == FxChannel::Left; }
+static bool wantR(FxChannel ch) { return ch == FxChannel::Both || ch == FxChannel::Right; }
+
 static void processGain(FxStep& step, int16_t* interleaved, int frames, int channels) {
     const float g = dbToLin(step.gainDb);
     if (fabsf(g - 1.f) < 0.001f) return;
-    const int n = frames * channels;
-    for (int i = 0; i < n; ++i) {
-        float v = interleaved[i] * g;
-        clamp16(v);
-        interleaved[i] = (int16_t)v;
+    for (int f = 0; f < frames; ++f) {
+        if (wantL(step.channel)) {
+            float v = interleaved[f * channels + 0] * g;
+            clamp16(v);
+            interleaved[f * channels + 0] = (int16_t)v;
+        }
+        if (channels > 1 && wantR(step.channel)) {
+            float v = interleaved[f * channels + 1] * g;
+            clamp16(v);
+            interleaved[f * channels + 1] = (int16_t)v;
+        }
     }
 }
 
-static void processEq(FxChain::EqState& st, int16_t* interleaved, int frames, int channels) {
+static void processEq(FxChain::EqState& st, const FxStep& step, int16_t* interleaved, int frames, int channels) {
     bool flatShape = true;
     for (int i = 0; i < kEqControls; ++i) {
         if (fabsf(st.ctrl[i] - st.meanDb) > 0.05f) { flatShape = false; break; }
     }
     for (int f = 0; f < frames; ++f) {
-        float L = interleaved[f * channels + 0] * st.meanLin;
-        if (!flatShape) {
-            for (int i = 0; i < kEqInternal; ++i)
-                L = st.L[i].process(L);
+        if (wantL(step.channel)) {
+            float L = interleaved[f * channels + 0] * st.meanLin;
+            if (!flatShape) {
+                for (int i = 0; i < kEqInternal; ++i)
+                    L = st.L[i].process(L);
+            }
+            clamp16(L);
+            interleaved[f * channels + 0] = (int16_t)L;
         }
-        clamp16(L);
-        interleaved[f * channels + 0] = (int16_t)L;
-        if (channels > 1) {
+        if (channels > 1 && wantR(step.channel)) {
             float R = interleaved[f * channels + 1] * st.meanLin;
             if (!flatShape) {
                 for (int i = 0; i < kEqInternal; ++i)
@@ -384,8 +395,10 @@ static void processComp(FxChain::CompState& st, const FxStep& step, float sr,
     const float relCoef = expf(-1.f / ((std::max)(1.f, st.releaseMs) * 0.001f * sr));
 
     for (int f = 0; f < frames; ++f) {
-        float peak = fabsf((float)interleaved[f * channels + 0]);
-        if (channels > 1) {
+        float peak = 0.f;
+        if (wantL(step.channel))
+            peak = fabsf((float)interleaved[f * channels + 0]);
+        if (channels > 1 && wantR(step.channel)) {
             const float r = fabsf((float)interleaved[f * channels + 1]);
             if (r > peak) peak = r;
         }
@@ -401,10 +414,15 @@ static void processComp(FxChain::CompState& st, const FxStep& step, float sr,
             grDb = (thresh - envDb) * (1.f - 1.f / ratio);
         const float g = dbToLin(grDb) * makeup;
 
-        for (int c = 0; c < channels; ++c) {
-            float v = interleaved[f * channels + c] * g;
+        if (wantL(step.channel)) {
+            float v = interleaved[f * channels + 0] * g;
             clamp16(v);
-            interleaved[f * channels + c] = (int16_t)v;
+            interleaved[f * channels + 0] = (int16_t)v;
+        }
+        if (channels > 1 && wantR(step.channel)) {
+            float v = interleaved[f * channels + 1] * g;
+            clamp16(v);
+            interleaved[f * channels + 1] = (int16_t)v;
         }
     }
 }
@@ -414,19 +432,35 @@ static void processPan(const FxStep& step, int16_t* interleaved, int frames, int
     float p = step.pan;
     if (p < -1.f) p = -1.f;
     if (p > 1.f) p = 1.f;
-    if (fabsf(p) < 0.001f) return;
 
-    // constant-power: pan -1..+1 → angle 0..pi/2
     const float angle = (p + 1.f) * 0.25f * (float)M_PI;
     const float gL = cosf(angle);
     const float gR = sinf(angle);
+
+    if (step.channel == FxChannel::Both) {
+        if (fabsf(p) < 0.001f) return;
+        for (int f = 0; f < frames; ++f) {
+            float L = interleaved[f * channels + 0] * gL;
+            float R = interleaved[f * channels + 1] * gR;
+            clamp16(L);
+            clamp16(R);
+            interleaved[f * channels + 0] = (int16_t)L;
+            interleaved[f * channels + 1] = (int16_t)R;
+        }
+        return;
+    }
+
+    // On a single side: scale that channel by its pan-law weight
     for (int f = 0; f < frames; ++f) {
-        float L = interleaved[f * channels + 0] * gL;
-        float R = interleaved[f * channels + 1] * gR;
-        clamp16(L);
-        clamp16(R);
-        interleaved[f * channels + 0] = (int16_t)L;
-        interleaved[f * channels + 1] = (int16_t)R;
+        if (step.channel == FxChannel::Left) {
+            float L = interleaved[f * channels + 0] * gL;
+            clamp16(L);
+            interleaved[f * channels + 0] = (int16_t)L;
+        } else {
+            float R = interleaved[f * channels + 1] * gR;
+            clamp16(R);
+            interleaved[f * channels + 1] = (int16_t)R;
+        }
     }
 }
 
@@ -437,10 +471,12 @@ static void processHp(FxChain::FilterState& st, const FxStep& step, float sr,
     if (step.hpHz <= 0.f) return;
 
     for (int f = 0; f < frames; ++f) {
-        float L = st.L.process((float)interleaved[f * channels + 0]);
-        clamp16(L);
-        interleaved[f * channels + 0] = (int16_t)L;
-        if (channels > 1) {
+        if (wantL(step.channel)) {
+            float L = st.L.process((float)interleaved[f * channels + 0]);
+            clamp16(L);
+            interleaved[f * channels + 0] = (int16_t)L;
+        }
+        if (channels > 1 && wantR(step.channel)) {
             float R = st.R.process((float)interleaved[f * channels + 1]);
             clamp16(R);
             interleaved[f * channels + 1] = (int16_t)R;
@@ -455,10 +491,12 @@ static void processLp(FxChain::FilterState& st, const FxStep& step, float sr,
     if (step.lpHz <= 0.f) return;
 
     for (int f = 0; f < frames; ++f) {
-        float L = st.L.process((float)interleaved[f * channels + 0]);
-        clamp16(L);
-        interleaved[f * channels + 0] = (int16_t)L;
-        if (channels > 1) {
+        if (wantL(step.channel)) {
+            float L = st.L.process((float)interleaved[f * channels + 0]);
+            clamp16(L);
+            interleaved[f * channels + 0] = (int16_t)L;
+        }
+        if (channels > 1 && wantR(step.channel)) {
             float R = st.R.process((float)interleaved[f * channels + 1]);
             clamp16(R);
             interleaved[f * channels + 1] = (int16_t)R;
@@ -472,13 +510,14 @@ static void processLimit(FxChain::LimitState& st, const FxStep& step, float sr,
         applyLimitParams(st, step);
 
     const float thresh = st.thresholdDb;
-    // near-instant attack, tunable release
     const float atkCoef = expf(-1.f / (0.2f * 0.001f * sr));
     const float relCoef = expf(-1.f / ((std::max)(1.f, st.releaseMs) * 0.001f * sr));
 
     for (int f = 0; f < frames; ++f) {
-        float peak = fabsf((float)interleaved[f * channels + 0]);
-        if (channels > 1) {
+        float peak = 0.f;
+        if (wantL(step.channel))
+            peak = fabsf((float)interleaved[f * channels + 0]);
+        if (channels > 1 && wantR(step.channel)) {
             const float r = fabsf((float)interleaved[f * channels + 1]);
             if (r > peak) peak = r;
         }
@@ -491,13 +530,18 @@ static void processLimit(FxChain::LimitState& st, const FxStep& step, float sr,
         const float envDb = linToDb(st.env);
         float grDb = 0.f;
         if (envDb > thresh)
-            grDb = thresh - envDb; // infinite ratio
+            grDb = thresh - envDb;
         const float g = dbToLin(grDb);
 
-        for (int c = 0; c < channels; ++c) {
-            float v = interleaved[f * channels + c] * g;
+        if (wantL(step.channel)) {
+            float v = interleaved[f * channels + 0] * g;
             clamp16(v);
-            interleaved[f * channels + c] = (int16_t)v;
+            interleaved[f * channels + 0] = (int16_t)v;
+        }
+        if (channels > 1 && wantR(step.channel)) {
+            float v = interleaved[f * channels + 1] * g;
+            clamp16(v);
+            interleaved[f * channels + 1] = (int16_t)v;
         }
     }
 }
@@ -511,13 +555,14 @@ static void processGate(FxChain::GateState& st, const FxStep& step, float sr,
     const float closed = dbToLin(st.rangeDb);
     const float atkCoef = expf(-1.f / ((std::max)(0.1f, st.attackMs) * 0.001f * sr));
     const float relCoef = expf(-1.f / ((std::max)(1.f, st.releaseMs) * 0.001f * sr));
-    // envelope follow
     const float envAtk = expf(-1.f / (1.f * 0.001f * sr));
     const float envRel = expf(-1.f / (20.f * 0.001f * sr));
 
     for (int f = 0; f < frames; ++f) {
-        float peak = fabsf((float)interleaved[f * channels + 0]);
-        if (channels > 1) {
+        float peak = 0.f;
+        if (wantL(step.channel))
+            peak = fabsf((float)interleaved[f * channels + 0]);
+        if (channels > 1 && wantR(step.channel)) {
             const float r = fabsf((float)interleaved[f * channels + 1]);
             if (r > peak) peak = r;
         }
@@ -533,22 +578,34 @@ static void processGate(FxChain::GateState& st, const FxStep& step, float sr,
         else
             st.gain = relCoef * st.gain + (1.f - relCoef) * target;
 
-        for (int c = 0; c < channels; ++c) {
-            float v = interleaved[f * channels + c] * st.gain;
+        if (wantL(step.channel)) {
+            float v = interleaved[f * channels + 0] * st.gain;
             clamp16(v);
-            interleaved[f * channels + c] = (int16_t)v;
+            interleaved[f * channels + 0] = (int16_t)v;
+        }
+        if (channels > 1 && wantR(step.channel)) {
+            float v = interleaved[f * channels + 1] * st.gain;
+            clamp16(v);
+            interleaved[f * channels + 1] = (int16_t)v;
         }
     }
 }
 
-static void processWave(FxChain::WaveState& st, int16_t* interleaved, int frames, int channels) {
+static void processWave(FxChain::WaveState& st, const FxStep& step, int16_t* interleaved, int frames, int channels) {
     if (frames <= 0) return;
     for (int i = 0; i < kWaveCapture; ++i) {
         int f = (i * frames) / kWaveCapture;
         if (f >= frames) f = frames - 1;
-        float v = interleaved[f * channels + 0] / 32768.f;
-        if (channels > 1)
-            v = 0.5f * (v + interleaved[f * channels + 1] / 32768.f);
+        float v = 0.f;
+        if (step.channel == FxChannel::Right && channels > 1)
+            v = interleaved[f * channels + 1] / 32768.f;
+        else if (step.channel == FxChannel::Left)
+            v = interleaved[f * channels + 0] / 32768.f;
+        else {
+            v = interleaved[f * channels + 0] / 32768.f;
+            if (channels > 1)
+                v = 0.5f * (v + interleaved[f * channels + 1] / 32768.f);
+        }
         st.samples[i] = v;
     }
 }
@@ -575,7 +632,7 @@ void FxChain::process(int16_t* interleaved, int frames, int channels) {
         if (step.kind == FxKind::Gain) {
             processGain(step, interleaved, frames, channels);
         } else if (step.kind == FxKind::Eq && eqIdx < (int)eqStates.size()) {
-            processEq(eqStates[eqIdx++], interleaved, frames, channels);
+            processEq(eqStates[eqIdx++], step, interleaved, frames, channels);
         } else if (step.kind == FxKind::Comp && compIdx < (int)compStates.size()) {
             processComp(compStates[compIdx++], step, sampleRate, interleaved, frames, channels);
         } else if (step.kind == FxKind::Pan) {
@@ -589,7 +646,7 @@ void FxChain::process(int16_t* interleaved, int frames, int channels) {
         } else if (step.kind == FxKind::Gate && gateIdx < (int)gateStates.size()) {
             processGate(gateStates[gateIdx++], step, sampleRate, interleaved, frames, channels);
         } else if (step.kind == FxKind::Waveform && waveIdx < (int)waveStates.size()) {
-            processWave(waveStates[waveIdx++], interleaved, frames, channels);
+            processWave(waveStates[waveIdx++], step, interleaved, frames, channels);
         }
     }
 }

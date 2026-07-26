@@ -45,6 +45,7 @@ struct UiState {
 
     bool dragWire = false;
     int wireNode = -1;
+    int wirePort = 0;
     bool wireFromOutPort = true;
     POINT wireFrom{};
     POINT wireCur{};
@@ -223,7 +224,14 @@ static void tryStartStop(HWND hwnd) {
             std::lock_guard lock(g_liveFxMu);
             LiveFxBinding b;
             b.fx = job.fx;
-            b.effectNodes = r.effects;
+            if (r.hasSplit) {
+                b.effectNodes = r.preEffects;
+                b.effectNodes.insert(b.effectNodes.end(), r.leftEffects.begin(), r.leftEffects.end());
+                b.effectNodes.insert(b.effectNodes.end(), r.rightEffects.begin(), r.rightEffects.end());
+                b.effectNodes.insert(b.effectNodes.end(), r.postEffects.begin(), r.postEffects.end());
+            } else {
+                b.effectNodes = r.effects;
+            }
             g_liveFx.push_back(std::move(b));
         }
         g_threads.emplace_back(runJob, job);
@@ -588,22 +596,26 @@ static void onLButtonDown(HWND hwnd, int x, int y) {
         return;
     }
 
-    int oi = hitOutPortAt(g_ui.graph, g_ui.view, x, y);
+    int outPort = 0;
+    int oi = hitOutPortAt(g_ui.graph, g_ui.view, x, y, &outPort);
     if (oi >= 0) {
         g_ui.dragWire = true;
         g_ui.wireNode = oi;
+        g_ui.wirePort = outPort;
         g_ui.wireFromOutPort = true;
-        g_ui.wireFrom = outPortScreen(g_ui.graph.nodes[oi], g_ui.view);
+        g_ui.wireFrom = outPortScreen(g_ui.graph.nodes[oi], g_ui.view, outPort);
         g_ui.wireCur = { x, y };
         SetCapture(hwnd);
         return;
     }
-    int ii = hitInPortAt(g_ui.graph, g_ui.view, x, y);
+    int inPort = 0;
+    int ii = hitInPortAt(g_ui.graph, g_ui.view, x, y, &inPort);
     if (ii >= 0) {
         g_ui.dragWire = true;
         g_ui.wireNode = ii;
+        g_ui.wirePort = inPort;
         g_ui.wireFromOutPort = false;
-        g_ui.wireFrom = inPortScreen(g_ui.graph.nodes[ii], g_ui.view);
+        g_ui.wireFrom = inPortScreen(g_ui.graph.nodes[ii], g_ui.view, inPort);
         g_ui.wireCur = { x, y };
         SetCapture(hwnd);
         return;
@@ -661,8 +673,8 @@ static void onMouseMove(HWND hwnd, int x, int y) {
     }
     if (g_ui.dragWire) {
         g_ui.wireFrom = g_ui.wireFromOutPort
-            ? outPortScreen(g_ui.graph.nodes[g_ui.wireNode], g_ui.view)
-            : inPortScreen(g_ui.graph.nodes[g_ui.wireNode], g_ui.view);
+            ? outPortScreen(g_ui.graph.nodes[g_ui.wireNode], g_ui.view, g_ui.wirePort)
+            : inPortScreen(g_ui.graph.nodes[g_ui.wireNode], g_ui.view, g_ui.wirePort);
         g_ui.wireCur = { x, y };
         changed = true;
     }
@@ -697,18 +709,22 @@ static void onLButtonUp(HWND hwnd, int x, int y) {
     }
     if (g_ui.dragWire) {
         const int fromNode = g_ui.wireNode;
+        const int fromPort = g_ui.wirePort;
         const bool fromOut = g_ui.wireFromOutPort;
         g_ui.dragWire = false;
         g_ui.wireNode = -1;
+        g_ui.wirePort = 0;
         ReleaseCapture();
 
         if (fromOut) {
-            int to = hitInPortAt(g_ui.graph, g_ui.view, x, y);
-            if (to >= 0 && addLink(g_ui.graph, fromNode, to))
+            int toPort = 0;
+            int to = hitInPortAt(g_ui.graph, g_ui.view, x, y, &toPort);
+            if (to >= 0 && addLink(g_ui.graph, fromNode, to, fromPort, toPort))
                 setStatus(L"Connected. Choose devices, then Run.");
         } else {
-            int from = hitOutPortAt(g_ui.graph, g_ui.view, x, y);
-            if (from >= 0 && addLink(g_ui.graph, from, fromNode))
+            int outPort = 0;
+            int from = hitOutPortAt(g_ui.graph, g_ui.view, x, y, &outPort);
+            if (from >= 0 && addLink(g_ui.graph, from, fromNode, outPort, fromPort))
                 setStatus(L"Connected. Choose devices, then Run.");
         }
         InvalidateRect(hwnd, nullptr, FALSE);

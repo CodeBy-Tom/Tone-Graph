@@ -16,6 +16,8 @@ enum class NodeKind {
     LowPass = 8,
     Limit = 9,
     Gate = 10,
+    Split = 11,
+    Merge = 12,
 };
 
 enum class NodePickMode {
@@ -84,9 +86,12 @@ struct NodeTypeInfo {
     const NodeBehavior* behavior;
 };
 
+// port 0 = main / Left, port 1 = Right (Split outs / Merge ins)
 struct Connection {
     int from = -1;
     int to = -1;
+    int fromPort = 0;
+    int toPort = 0;
 };
 
 struct NodeGraph {
@@ -104,11 +109,19 @@ struct NodeFonts {
     HFONT title = nullptr;
 };
 
-// one Input → effects → Output chain
+// one Input → effects → Output chain (optional L/R split diamond)
 struct AudioRoute {
     int source = -1;
     int sink = -1;
-    std::vector<int> effects;
+    std::vector<int> effects; // linear (no split)
+
+    bool hasSplit = false;
+    int splitNode = -1;
+    int mergeNode = -1;
+    std::vector<int> preEffects;
+    std::vector<int> leftEffects;
+    std::vector<int> rightEffects;
+    std::vector<int> postEffects;
 };
 
 constexpr int kNodeW = 240;
@@ -118,6 +131,7 @@ constexpr int kKnobNodeH = 128;
 constexpr int kCompNodeH = 148;
 constexpr int kGateNodeH = 148;
 constexpr int kWaveNodeH = 160;
+constexpr int kSplitNodeH = 120;
 constexpr int kPortR = 7;
 constexpr int kWireHitPx = 10;
 constexpr float kEqMinDb = -12.f;
@@ -130,6 +144,8 @@ const NodeBehavior& nodeBehavior(NodeKind kind);
 int nodeCatalogCount();
 
 int nodeHeight(const GraphNode& n);
+int nodeInPortCount(const GraphNode& n);
+int nodeOutPortCount(const GraphNode& n);
 RECT nodeRectWorld(const GraphNode& n);
 RECT nodeRectScreen(const GraphNode& n, const NodeView& view);
 RECT nodeFieldRectScreen(const GraphNode& n, const NodeView& view);
@@ -137,10 +153,10 @@ RECT eqCurveRectScreen(const GraphNode& n, const NodeView& view);
 RECT eqPresetRectScreen(const GraphNode& n, const NodeView& view);
 RECT wavePlotRectScreen(const GraphNode& n, const NodeView& view);
 RECT nodeMeterRectScreen(const GraphNode& n, const NodeView& view);
-POINT outPortWorld(const GraphNode& n);
-POINT inPortWorld(const GraphNode& n);
-POINT outPortScreen(const GraphNode& n, const NodeView& view);
-POINT inPortScreen(const GraphNode& n, const NodeView& view);
+POINT outPortWorld(const GraphNode& n, int port = 0);
+POINT inPortWorld(const GraphNode& n, int port = 0);
+POINT outPortScreen(const GraphNode& n, const NodeView& view, int port = 0);
+POINT inPortScreen(const GraphNode& n, const NodeView& view, int port = 0);
 POINT worldToScreen(POINT w, const NodeView& view);
 POINT screenToWorld(int sx, int sy, const NodeView& view);
 
@@ -165,7 +181,7 @@ bool copyNodeWaveform(const NodeGraph& g, int nodeIdx, float* out, int count);
 
 GraphNode makeNode(NodeKind kind, int worldX, int worldY);
 void deleteNode(NodeGraph& g, int idx);
-bool addLink(NodeGraph& g, int from, int to);
+bool addLink(NodeGraph& g, int from, int to, int fromPort = 0, int toPort = 0);
 void rebindNodes(NodeGraph& g);
 std::wstring nodeLabel(const GraphNode& n);
 bool nodeCanRun(const GraphNode& n);
@@ -177,15 +193,14 @@ bool routeRunnable(const NodeGraph& g, const AudioRoute& route);
 bool buildJobFromRoute(const NodeGraph& g, const AudioRoute& route, Job& outJob, bool forceLoopback);
 bool linkOnRunnableRoute(const NodeGraph& g, int linkIdx);
 
-// leftover helpers still used in a couple spots
 bool linkRunnable(const NodeGraph& g, int linkIdx);
 std::vector<int> runnableLinks(const NodeGraph& g);
 bool buildJobFromLink(const NodeGraph& g, int linkIdx, Job& outJob, bool forceLoopback);
 
 int hitNodeAt(const NodeGraph& g, const NodeView& view, int sx, int sy);
 int hitWireAt(const NodeGraph& g, const NodeView& view, int sx, int sy);
-int hitOutPortAt(const NodeGraph& g, const NodeView& view, int sx, int sy);
-int hitInPortAt(const NodeGraph& g, const NodeView& view, int sx, int sy);
+int hitOutPortAt(const NodeGraph& g, const NodeView& view, int sx, int sy, int* outPort = nullptr);
+int hitInPortAt(const NodeGraph& g, const NodeView& view, int sx, int sy, int* outPort = nullptr);
 
 void drawNode(HDC hdc, const GraphNode& n, const NodeView& view, const NodeFonts& fonts,
               bool flowing, float meterIn, float meterOut, const NodeGraph* graph, int nodeIdx);
